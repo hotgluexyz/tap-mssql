@@ -73,7 +73,7 @@ class Tapmssql(SQLTap):
         ),
         th.Property(
             "port",
-            th.IntegerType,
+            th.StringType,
             description="The port on which SQL awaiting connection"
         ),
         th.Property(
