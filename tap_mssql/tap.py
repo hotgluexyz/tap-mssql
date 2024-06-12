@@ -26,7 +26,7 @@ class Tapmssql(SQLTap):
         if self._tap_connector is None:
             self._tap_connector = self.default_connector_class(dict(self.config))
         return self._tap_connector
-    
+
     @property
     def catalog_dict(self) -> dict:
         """Get catalog dictionary.
@@ -44,6 +44,14 @@ class Tapmssql(SQLTap):
 
         result: dict[str, list[dict]] = {"streams": []}
         result["streams"].extend(connector.discover_catalog_entries())
+
+        for stream, rep_key in self.config.get("replication_schema", {}).items():
+            for idx, stream_content in enumerate(result["streams"]):
+                if stream_content["table_name"] == stream:
+                    result["streams"][idx]["replication_method"] = "INCREMENTAL"
+                    result["streams"][idx]["replication_key"] = rep_key
+                else:
+                    result["streams"][idx]["replication_method"] = "FULL_TABLE"
 
         self._catalog_dict = result
         return self._catalog_dict
