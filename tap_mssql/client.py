@@ -56,6 +56,7 @@ class mssqlConnector(SQLConnector):
             config.get('user'),
             config.get('password'),
             servername=config.get('host'),
+            server=config.get('host'),
             database=config.get('database')
         )
 
@@ -67,6 +68,7 @@ class mssqlConnector(SQLConnector):
                 config.get('sqlalchemy_url_query')
                 )
 
+        self.logger.info(f"Built URL: {config_url}")
         return (config_url)
 
     def create_engine(self) -> Engine:
