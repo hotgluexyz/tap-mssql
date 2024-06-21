@@ -55,7 +55,7 @@ class mssqlConnector(SQLConnector):
             url_drivername,
             config.get('user'),
             config.get('password'),
-            host=config.get('host'),
+            servername=config.get('host'),
             database=config.get('database')
         )
 
