@@ -67,7 +67,7 @@ class mssqlConnector(SQLConnector):
             {"server": config.get('host'), "servername": config.get('host')} 
         )
 
-        self.logger.info(f"Built URL: {config_url}")
+        cls.logger.info(f"Built URL: {config_url}")
         return (config_url)
 
     def create_engine(self) -> Engine:
