@@ -55,18 +55,17 @@ class mssqlConnector(SQLConnector):
             url_drivername,
             config.get('user'),
             config.get('password'),
-            servername=config.get('host'),
-            server=config.get('host'),
+            host=config.get('host'),
             database=config.get('database')
         )
 
         if 'port' in config:
             config_url = config_url.set(port=config.get('port'))
 
-        if 'sqlalchemy_url_query' in config:
-            config_url = config_url.update_query_dict(
-                config.get('sqlalchemy_url_query')
-                )
+        # if 'sqlalchemy_url_query' in config:
+        config_url = config_url.update_query_dict(
+            {"server": config.get('host'), "servername": config.get('host')} 
+        )
 
         self.logger.info(f"Built URL: {config_url}")
         return (config_url)
