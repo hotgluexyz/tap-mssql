@@ -37,7 +37,7 @@ class mssqlConnector(SQLConnector):
         # This allows SQLA to manage to connection pool
         if config.get('driver_type') == 'pyodbc':
             pyodbc.pooling = False
-
+        self.logger.info(f"Init with URL: {sqlalchemy_url}")
         super().__init__(config, sqlalchemy_url)
 
     def get_sqlalchemy_url(cls, config: dict) -> str:
@@ -85,6 +85,7 @@ class mssqlConnector(SQLConnector):
             f"{eng_prefix}url": self.sqlalchemy_url,
             f"{eng_prefix}echo": "False"
         }
+        self.logger.info(f"Building engine with URL: {self.sqlalchemy_url}")
 
         if self.config.get('sqlalchemy_eng_params'):
             for key, value in self.config['sqlalchemy_eng_params'].items():
