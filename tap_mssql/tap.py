@@ -7,6 +7,12 @@ from singer_sdk import typing as th  # JSON schema typing helpers
 
 from tap_mssql.client import mssqlStream, mssqlConnector
 
+import logging
+
+# Enable SQLAlchemy logging
+logging.basicConfig()
+logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
+
 
 class Tapmssql(SQLTap):
     """mssql tap class."""
