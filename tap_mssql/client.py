@@ -368,6 +368,45 @@ class mssqlConnector(SQLConnector):
         """
 
         return SQLConnector.to_sql_type(jsonschema_type)
+    
+    @staticmethod
+    def get_fully_qualified_name(
+        table_name: str | None = None,
+        schema_name: str | None = None,
+        db_name: str | None = None,
+        delimiter: str = ".",
+    ) -> str:
+        """Concatenates a fully qualified name from the parts.
+
+        Args:
+            table_name: The name of the table.
+            schema_name: The name of the schema. Defaults to None.
+            db_name: The name of the database. Defaults to None.
+            delimiter: Generally: '.' for SQL names and '-' for Singer names.
+
+        Raises:
+            ValueError: If all 3 name parts not supplied.
+
+        Returns:
+            The fully qualified name as a string.
+        """
+        parts = []
+
+        if table_name:
+            parts.append(table_name)
+
+        if not parts:
+            raise ValueError(
+                "Could not generate fully qualified name: "
+                + ":".join(
+                    [
+                        table_name or "(unknown-table-name)",
+                    ],
+                ),
+            )
+
+        return table_name
+
 
 
 class CustomJSONEncoder(json.JSONEncoder):
@@ -579,4 +618,3 @@ class mssqlStream(SQLStream):
                     # Record filtered out during post_process()
                     continue
                 yield transformed_record
-
