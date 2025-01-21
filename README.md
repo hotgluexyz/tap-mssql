@@ -6,6 +6,8 @@
 Built with the [Meltano Tap SDK](https://sdk.meltano.com) for Singer Taps.
 
 ### Whats New 🛳️🎉
+**2025-01-21:**  The tap now uses `pyodbc` instead of `pymssql`.  This is a big step forward as `pyodbc` is the only driver that is supported by Microsoft.  `pymssql` is no longer supported and is now removed.
+
 **2023-08-07 Fix:**  The installation issue with `pymssql` has been fixed by making `pymssql` 2.2.7 required
 
 **2023-07-17 Upgraded to Meltano Singer-SDK 0.30.0:** 
