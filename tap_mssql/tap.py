@@ -43,7 +43,17 @@ class Tapmssql(SQLTap):
         connector = self.tap_connector
 
         result: dict[str, list[dict]] = {"streams": []}
-        result["streams"].extend(connector.discover_catalog_entries())
+        catalog_entries = connector.discover_catalog_entries()
+
+        config_replication_keys = self.config.get("replication_keys")
+        if config_replication_keys:
+            for catalog_entry in catalog_entries:
+                for replication_key in config_replication_keys:
+                    if catalog_entry.get("table_name") == replication_key.get("table"):
+                        catalog_entry["replication_key"] = replication_key.get("replication_key")
+                        break
+
+        result["streams"].extend(catalog_entries)
 
         self._catalog_dict = result
         return self._catalog_dict
