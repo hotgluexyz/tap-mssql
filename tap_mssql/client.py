@@ -49,7 +49,7 @@ class mssqlConnector(SQLConnector):
         Returns:
             The URL as a string.
         """
-        url_drivername = f"{config.get('dialect', 'mssql')}+{config.get('driver_type', 'pyodbc')}"
+        url_drivername = f"{config.get('dialect')}+{config.get('driver_type')}"
         
         config_url = URL.create(
             url_drivername,
@@ -62,19 +62,11 @@ class mssqlConnector(SQLConnector):
         if 'port' in config:
             config_url = config_url.set(port=config.get('port'))
 
-        # Add the driver specification and SSL settings to the URL query parameters
-        driver_query = {
-            "driver": "ODBC Driver 18 for SQL Server",
-            "TrustServerCertificate": "yes",  # Add this to trust the server certificate
-            "Encrypt": "yes"                  # Ensure encryption is enabled
-        }
-        
-        if 'sqlalchemy_url_query' in config:
-            driver_query.update(config.get('sqlalchemy_url_query'))
-        
-        config_url = config_url.update_query_dict(driver_query)
+        config_url = config_url.update_query_dict(
+            config.get('sqlalchemy_url_query')
+        )
 
-        return str(config_url)
+        return config_url
 
     def create_engine(self) -> Engine:
         """Return a new SQLAlchemy engine using the provided config.
@@ -368,45 +360,6 @@ class mssqlConnector(SQLConnector):
         """
 
         return SQLConnector.to_sql_type(jsonschema_type)
-    
-    @staticmethod
-    def get_fully_qualified_name(
-        table_name: str | None = None,
-        schema_name: str | None = None,
-        db_name: str | None = None,
-        delimiter: str = ".",
-    ) -> str:
-        """Concatenates a fully qualified name from the parts.
-
-        Args:
-            table_name: The name of the table.
-            schema_name: The name of the schema. Defaults to None.
-            db_name: The name of the database. Defaults to None.
-            delimiter: Generally: '.' for SQL names and '-' for Singer names.
-
-        Raises:
-            ValueError: If all 3 name parts not supplied.
-
-        Returns:
-            The fully qualified name as a string.
-        """
-        parts = []
-
-        if table_name:
-            parts.append(table_name)
-
-        if not parts:
-            raise ValueError(
-                "Could not generate fully qualified name: "
-                + ":".join(
-                    [
-                        table_name or "(unknown-table-name)",
-                    ],
-                ),
-            )
-
-        return table_name
-
 
 
 class CustomJSONEncoder(json.JSONEncoder):
