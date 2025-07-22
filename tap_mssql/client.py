@@ -511,8 +511,6 @@ class mssqlStream(SQLStream):
         query = table.select()
 
         if self.replication_key:
-            self.logger.info(f"replication_key is: {self.replication_key}")
-            self.logger.info(f"table columns: {list(table.columns)}")
             replication_key_col = table.columns[self.replication_key]
             query = query.order_by(replication_key_col)
             # # remove all below in final #
