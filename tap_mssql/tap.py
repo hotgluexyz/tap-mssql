@@ -51,7 +51,7 @@ class Tapmssql(SQLTap):
         if config_replication_keys:
             for catalog_entry in catalog_entries:
                 for replication_key in config_replication_keys:
-                    if catalog_entry.get("table_name") == replication_key.get("table"):
+                    if catalog_entry.get("tap_stream_id") == replication_key.get("table"):
                         catalog_entry["replication_key"] = replication_key.get("replication_key")
                         break
 
