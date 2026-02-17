@@ -589,13 +589,13 @@ class mssqlStream(SQLStream):
     def _build_bcp_command(
         self,
         sql_query: str,
-        output_file: str,
+        output_file: str | None = None,
     ) -> list[str]:
         """Build BCP command arguments.
 
         Args:
             sql_query: SQL query string to execute.
-            output_file: Path to output CSV file.
+            output_file: Path to output CSV file. If None, outputs to stdout.
 
         Returns:
             List of command arguments for subprocess.
@@ -621,7 +621,7 @@ class mssqlStream(SQLStream):
             'bcp',
             sql_query,  # The query string will be passed as-is, subprocess handles quoting
             'queryout',
-            output_file,
+            output_file if output_file else '/dev/stdout',
             '-S', server,
             '-d', database,
             '-U', user,
@@ -758,13 +758,13 @@ class mssqlStream(SQLStream):
         # Build SQL query string
         sql_query = self._build_sql_query_string(selected_column_names, context)
 
-        # Create temporary file for BCP output
-        temp_fd, temp_file = tempfile.mkstemp(suffix='.csv', prefix='bcp_export_')
+        # Create final compressed file
+        temp_fd, compressed_file = tempfile.mkstemp(suffix='.csv.gz', prefix='bcp_export_')
         os.close(temp_fd)  # Close file descriptor, we'll use the path
 
         try:
-            # Build and execute BCP command
-            bcp_cmd = self._build_bcp_command(sql_query, temp_file)
+            # Build BCP command to output to stdout
+            bcp_cmd = self._build_bcp_command(sql_query, output_file=None)
             
             # Log BCP command (hide password for security)
             bcp_cmd_safe = bcp_cmd.copy()
@@ -772,38 +772,67 @@ class mssqlStream(SQLStream):
                 pwd_idx = bcp_cmd_safe.index('-P')
                 if pwd_idx + 1 < len(bcp_cmd_safe):
                     bcp_cmd_safe[pwd_idx + 1] = '***'
-            self.logger.info(f'Executing BCP: {" ".join(bcp_cmd_safe)}')
+            self.logger.info(f'Executing BCP piped to gzip: {" ".join(bcp_cmd_safe)} | gzip > {compressed_file}')
             self.logger.info(f'BCP SQL query: {sql_query}')
             
-            # Time BCP CSV creation
+            # Time BCP and compression
             bcp_start_time = time.time()
-            # Execute BCP command
-            result = subprocess.run(
-                bcp_cmd,
-                capture_output=True,
-                text=True,
-                check=False,  # We'll check the return code manually
-            )
+            
+            # Open gzip file for writing
+            with open(compressed_file, 'wb') as gz_file:
+                # Start BCP process with stdout piped
+                bcp_process = subprocess.Popen(
+                    bcp_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=False,  # Use binary mode for piping to gzip
+                )
+                
+                # Start gzip process to compress BCP output
+                gzip_process = subprocess.Popen(
+                    ['gzip'],
+                    stdin=bcp_process.stdout,
+                    stdout=gz_file,
+                    stderr=subprocess.PIPE,
+                )
+                
+                # Close BCP's stdout to allow it to receive SIGPIPE if gzip exits
+                bcp_process.stdout.close()
+                
+                # Wait for both processes to complete
+                bcp_returncode = bcp_process.wait()
+                gzip_returncode = gzip_process.wait()
+                
+                # Check for errors
+                if bcp_returncode != 0:
+                    bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
+                    error_msg = f'BCP command failed with return code {bcp_returncode}'
+                    if bcp_stderr:
+                        error_msg += f': {bcp_stderr}'
+                    self.logger.error(error_msg)
+                    raise RuntimeError(error_msg)
+                
+                if gzip_returncode != 0:
+                    gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
+                    error_msg = f'gzip command failed with return code {gzip_returncode}'
+                    if gzip_stderr:
+                        error_msg += f': {gzip_stderr}'
+                    self.logger.error(error_msg)
+                    raise RuntimeError(error_msg)
+            
             bcp_end_time = time.time()
             bcp_duration = bcp_end_time - bcp_start_time
-
-            if result.returncode != 0:
-                error_msg = f'BCP command failed with return code {result.returncode}'
-                if result.stderr:
-                    error_msg += f': {result.stderr}'
-                if result.stdout:
-                    error_msg += f'\nstdout: {result.stdout}'
-                self.logger.error(error_msg)
-                raise RuntimeError(error_msg)
-
-            self.logger.info(f'BCP CSV creation completed in {bcp_duration:.2f} seconds')
             
-            # Get file size for logging
-            file_size = os.path.getsize(temp_file)
-            file_size_mb = file_size / (1024 * 1024)
-            self.logger.info(f'CSV file created: {temp_file} ({file_size_mb:.2f} MB)')
+            # Get compressed file size
+            compressed_size = os.path.getsize(compressed_file)
+            compressed_size_mb = compressed_size / (1024 * 1024)
             
-            # Don't yield any records - all data is in the CSV file
+            self.logger.info(
+                f'BCP export and compression completed in {bcp_duration:.2f} seconds. '
+                f'Compressed file: {compressed_file} ({compressed_size_mb:.2f} MB)'
+            )
+            
+            # Don't yield any records - all data is in the CSV.gz file
             # The SDK will output SCHEMA messages automatically when the stream syncs
             # Even if no records are yielded, the schema should still be output
             # because the SDK outputs schema before calling get_records()
@@ -814,6 +843,6 @@ class mssqlStream(SQLStream):
                 yield  # This makes the function a generator
             
         finally:
-            # Keep the CSV file - don't delete it
-            # The file is at temp_file location and contains all the data
+            # Keep the CSV.gz file - don't delete it
+            # The file is at compressed_file location and contains all the data
             pass
