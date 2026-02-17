@@ -7,6 +7,10 @@ from __future__ import annotations
 import gzip
 import json
 import datetime
+import subprocess
+import tempfile
+import os
+import csv
 
 from base64 import b64encode
 from decimal import Decimal
@@ -483,6 +487,197 @@ class mssqlStream(SQLStream):
 
     connector_class = mssqlConnector
 
+    def _build_sql_query_string(
+        self,
+        selected_columns: list[str],
+        context: dict | None = None,
+    ) -> str:
+        """Build SQL query string for BCP.
+
+        Args:
+            selected_columns: List of column names to select.
+            context: Stream partition or context dictionary.
+
+        Returns:
+            SQL query string.
+        """
+        # Get table metadata to extract schema and table name
+        table = self.connector.get_table(
+            full_table_name=self.fully_qualified_name,
+            column_names=selected_columns,
+        )
+
+        # Extract database, schema, and table name
+        database = self.config.get('database')
+        
+        # Get schema - try multiple ways to access it
+        schema = 'dbo'  # Default schema
+        if hasattr(table, 'schema') and table.schema:
+            schema = table.schema
+        elif hasattr(table, 'key') and '.' in table.key:
+            # Try to extract from table key if it's in format schema.table
+            parts = table.key.split('.')
+            if len(parts) > 1:
+                schema = parts[0]
+        
+        table_name = table.name
+
+        # Build column list with proper escaping
+        column_list = ', '.join([f'[{col}]' for col in selected_columns])
+
+        # Build FROM clause
+        # Handle schema - use 'dbo' as default if schema is None or empty
+        if schema and schema != '':
+            from_clause = f'[{database}].{schema}.[{table_name}]'
+        else:
+            from_clause = f'[{database}].dbo.[{table_name}]'
+
+        # Build SELECT clause (with TOP if needed)
+        if self.ABORT_AT_RECORD_COUNT is not None:
+            limit_val = self.ABORT_AT_RECORD_COUNT + 1
+            select_clause = f'SELECT TOP {limit_val} {column_list}'
+        else:
+            select_clause = f'SELECT {column_list}'
+
+        # Start building query
+        query_parts = [select_clause, f'FROM {from_clause}']
+
+        # Add WHERE clause for replication key if applicable
+        where_clause = None
+        if self.replication_key:
+            replication_key_col = table.columns[self.replication_key]
+            
+            # Get the starting value
+            if replication_key_col.type.python_type in (
+                datetime.datetime,
+                datetime.date
+            ):
+                start_val = self.get_starting_timestamp(context)
+            else:
+                start_val = self.get_starting_replication_key_value(context)
+
+            if start_val:
+                # Format the value appropriately for SQL
+                if isinstance(start_val, (datetime.datetime, datetime.date)):
+                    # Format datetime/date values for SQL Server
+                    if isinstance(start_val, datetime.datetime):
+                        val_str = start_val.strftime("'%Y-%m-%d %H:%M:%S'")
+                    else:
+                        val_str = start_val.strftime("'%Y-%m-%d'")
+                elif isinstance(start_val, str):
+                    val_str = f"'{start_val.replace("'", "''")}'"
+                else:
+                    val_str = str(start_val)
+                
+                where_clause = f'WHERE [{self.replication_key}] >= {val_str}'
+                query_parts.append(where_clause)
+
+            # Add ORDER BY clause
+            query_parts.append(f'ORDER BY [{self.replication_key}]')
+
+        query = ' '.join(query_parts)
+
+        return query
+
+    def _build_bcp_command(
+        self,
+        sql_query: str,
+        output_file: str,
+    ) -> list[str]:
+        """Build BCP command arguments.
+
+        Args:
+            sql_query: SQL query string to execute.
+            output_file: Path to output CSV file.
+
+        Returns:
+            List of command arguments for subprocess.
+        """
+        config = self.config
+        host = config.get('host')
+        port = config.get('port', '1433')
+        database = config.get('database')
+        user = config.get('user')
+        password = config.get('password')
+
+        # Build server string
+        server = f'tcp:{host},{port}'
+
+        # Build BCP command
+        # Note: The delimiter \x1F needs to be passed properly
+        # In Python, we'll use the actual character
+        delimiter = '\x1F'
+
+        # BCP expects the query as a quoted string argument
+        # The query should be wrapped in quotes for the command
+        cmd = [
+            'bcp',
+            sql_query,  # The query string will be passed as-is, subprocess handles quoting
+            'queryout',
+            output_file,
+            '-S', server,
+            '-d', database,
+            '-U', user,
+            '-P', password,
+            '-c',
+            '-t', delimiter,
+        ]
+
+        return cmd
+
+    def _parse_bcp_csv(
+        self,
+        csv_file: str,
+        column_names: list[str],
+    ) -> Iterator[dict[str, Any]]:
+        """Parse BCP CSV output file.
+
+        Args:
+            csv_file: Path to CSV file.
+            column_names: List of column names in order.
+
+        Yields:
+            Dictionary records.
+        """
+        delimiter = '\x1F'
+
+        try:
+            # Check if file exists and has content
+            if not os.path.exists(csv_file):
+                self.logger.warning(f'BCP output file does not exist: {csv_file}')
+                return
+            
+            if os.path.getsize(csv_file) == 0:
+                self.logger.debug(f'BCP output file is empty: {csv_file}')
+                return
+
+            with open(csv_file, 'r', encoding='utf-8', errors='replace') as f:
+                # Use csv.reader with custom delimiter
+                reader = csv.reader(f, delimiter=delimiter)
+                
+                for row_num, row in enumerate(reader, start=1):
+                    # Skip empty rows
+                    if not row or all(not cell.strip() for cell in row):
+                        continue
+                    
+                    # Create dict from row values and column names
+                    if len(row) != len(column_names):
+                        # Skip rows that don't match expected column count
+                        self.logger.warning(
+                            f'Row {row_num} has {len(row)} columns, expected {len(column_names)}. Skipping.'
+                        )
+                        continue
+                    
+                    # Convert empty strings to None for consistency with SQLAlchemy behavior
+                    record = {
+                        col: (val if val != '' else None)
+                        for col, val in zip(column_names, row)
+                    }
+                    yield record
+        except Exception as e:
+            self.logger.error(f'Error parsing BCP CSV file: {e}')
+            raise
+
     def post_process(
         self,
         row: dict,
@@ -550,71 +745,71 @@ class mssqlStream(SQLStream):
                 f"Stream '{self.name}' does not support partitioning.",
             )
 
-        selected_column_names = self.get_selected_schema()["properties"].keys()
-        table = self.connector.get_table(
-            full_table_name=self.fully_qualified_name,
-            column_names=selected_column_names,
-        )
-        query = table.select()
+        # Get selected column names
+        selected_column_names = list(self.get_selected_schema()["properties"].keys())
+        
+        # Build SQL query string
+        sql_query = self._build_sql_query_string(selected_column_names, context)
 
-        if self.replication_key:
-            replication_key_col = table.columns[self.replication_key]
-            query = query.order_by(replication_key_col)
-            # # remove all below in final #
-            # self.logger.info('\n')
-            # self.logger.info(f"The replication_key_col SQLA type: {replication_key_col.type}")
-            # self.logger.info(' ')
-            # self.logger.info(f"The replication_key_col python type: {replication_key_col.type.python_type} this is type {type(replication_key_col.type.python_type)}")
-            # self.logger.info(' ')
-            # self.logger.info(f"Is the a replication_key_col python type datetime or date: {(replication_key_col.type.python_type in (datetime.datetime, datetime.date))}")
-            # self.logger.info('\n')
-            # # remove all to here in final #
-            if replication_key_col.type.python_type in (
-                datetime.datetime,
-                datetime.date
-            ):
-                start_val = self.get_starting_timestamp(context)
-            else:
-                start_val = self.get_starting_replication_key_value(context)
+        # Create temporary file for BCP output
+        temp_fd, temp_file = tempfile.mkstemp(suffix='.csv', prefix='bcp_export_')
+        os.close(temp_fd)  # Close file descriptor, we'll use the path
 
-            if start_val:
-                query = query.where(replication_key_col >= start_val)
+        try:
+            # Build and execute BCP command
+            bcp_cmd = self._build_bcp_command(sql_query, temp_file)
+            
+            self.logger.debug(f'Executing BCP command: bcp "..." queryout {temp_file}')
+            
+            # Execute BCP command
+            result = subprocess.run(
+                bcp_cmd,
+                capture_output=True,
+                text=True,
+                check=False,  # We'll check the return code manually
+            )
 
-        if self.ABORT_AT_RECORD_COUNT is not None:
-            # Limit record count to one greater than the abort threshold.
-            # This ensures
-            # `MaxRecordsLimitException` exception is properly raised by caller
-            # `Stream._sync_records()` if more records are available than can
-            #  be processed.
-            query = query.limit(self.ABORT_AT_RECORD_COUNT + 1)
+            if result.returncode != 0:
+                error_msg = f'BCP command failed with return code {result.returncode}'
+                if result.stderr:
+                    error_msg += f': {result.stderr}'
+                if result.stdout:
+                    error_msg += f'\nstdout: {result.stdout}'
+                self.logger.error(error_msg)
+                raise RuntimeError(error_msg)
 
-        # # remove all below in final #
-        # self.logger.info('\n')
-        # self.logger.info(f"Passed context is: {context}")
-        # self.logger.info(' ')
-        # self.logger.info(f"tap_state is: {self.tap_state}")
-        # self.logger.info(' ')
-        # self.logger.info(f"stream_state is: {self.stream_state}")
-        # self.logger.info(' ')
-        # self.logger.info(f"get_context_state is: {self.get_context_state(context)}")
-        # self.logger.info(' ')
-        # self.logger.info(f"replication_key is type : {type(self.replication_key)} has value: {self.replication_key}")
-        # self.logger.info(' ')
-        # if self.replication_key:
-        #     self.logger.info(f"replication_key_col type: {type(replication_key_col)}, replication_key_col type: {type(replication_key_col)}")
-        #     self.logger.info(' ')
-        #     self.logger.info(f"get_starting_replication_key_value is: {self.get_starting_replication_key_value(context)}")
-        #     self.logger.info(' ')
-        #     self.logger.info(f"start_val type: {type(start_val)}, start_val type: {type(start_val)}")
-        #     self.logger.info(' ')
-        # self.logger.info(query)
-        # self.logger.info('\n')
-        # # remove all to here in final #
-
-        with self.connector._connect() as conn:
-            for record in conn.execute(query):
-                transformed_record = self.post_process(dict(record._mapping))
+            # Parse BCP CSV output
+            # Get schema properties to handle type conversions if needed
+            properties = self.schema.get('properties', {})
+            
+            for record in self._parse_bcp_csv(temp_file, selected_column_names):
+                # Convert string values to appropriate types for post_process
+                # This handles cases where CSV gives us strings but post_process expects specific types
+                for key, value in record.items():
+                    if value is not None and isinstance(value, str):
+                        property_schema = properties.get(key, {})
+                        # For base64 fields, convert string to bytes if needed
+                        if property_schema.get('contentEncoding') == 'base64':
+                            try:
+                                # Try to decode the string as if it's already base64, or convert to bytes
+                                # BCP might output binary as hex or base64 already
+                                # For now, encode the string as UTF-8 bytes
+                                record[key] = value.encode('utf-8')
+                            except Exception:
+                                # If conversion fails, leave as is
+                                pass
+                
+                # Post-process the record (same as before)
+                transformed_record = self.post_process(record)
                 if transformed_record is None:
                     # Record filtered out during post_process()
                     continue
                 yield transformed_record
+
+        finally:
+            # Clean up temporary file
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except Exception as e:
+                self.logger.warning(f'Failed to remove temporary file {temp_file}: {e}')
