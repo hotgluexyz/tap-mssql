@@ -846,6 +846,7 @@ class mssqlStream(SQLStream):
                 gzip_returncode = gzip_process.wait()
             
             # Parse BCP stderr to extract record count
+            record_count = 0  # Initialize record count
             bcp_stderr_lines = []
             if bcp_stderr:
                 for line in bcp_stderr.strip().split('\n'):
@@ -856,7 +857,6 @@ class mssqlStream(SQLStream):
                 
                 # Parse final record count from stderr output
                 # Look for the final "X rows copied." message
-                record_count = 0
                 if bcp_stderr_lines:
                     # Log last few stderr lines for debugging
                     self.logger.debug(f'BCP stderr last 5 lines: {bcp_stderr_lines[-5:]}')
