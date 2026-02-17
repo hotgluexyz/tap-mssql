@@ -803,9 +803,23 @@ class mssqlStream(SQLStream):
                 bcp_returncode = bcp_process.wait()
                 gzip_returncode = gzip_process.wait()
                 
+                # Read and log BCP stderr (contains progress messages)
+                bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
+                if bcp_stderr:
+                    # Log BCP progress messages at debug level (they're informational)
+                    # Filter out the "Starting copy..." and other verbose messages
+                    for line in bcp_stderr.strip().split('\n'):
+                        if line.strip():
+                            # Log important info like row counts, but at debug level
+                            self.logger.debug(f'BCP: {line}')
+                
+                # Read and log gzip stderr if any
+                gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
+                if gzip_stderr:
+                    self.logger.debug(f'gzip: {gzip_stderr}')
+                
                 # Check for errors
                 if bcp_returncode != 0:
-                    bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
                     error_msg = f'BCP command failed with return code {bcp_returncode}'
                     if bcp_stderr:
                         error_msg += f': {bcp_stderr}'
@@ -813,7 +827,6 @@ class mssqlStream(SQLStream):
                     raise RuntimeError(error_msg)
                 
                 if gzip_returncode != 0:
-                    gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
                     error_msg = f'gzip command failed with return code {gzip_returncode}'
                     if gzip_stderr:
                         error_msg += f': {gzip_stderr}'
