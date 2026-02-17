@@ -808,6 +808,11 @@ class mssqlStream(SQLStream):
             # Even if no records are yielded, the schema should still be output
             # because the SDK outputs schema before calling get_records()
             
+            # Return empty generator (function must be a generator, even if it yields nothing)
+            # Using an empty generator to satisfy the iterable requirement
+            if False:
+                yield  # This makes the function a generator
+            
         finally:
             # Keep the CSV file - don't delete it
             # The file is at temp_file location and contains all the data
