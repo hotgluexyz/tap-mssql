@@ -815,51 +815,70 @@ class mssqlStream(SQLStream):
             
             # Time BCP and compression
             bcp_start_time = time.time()
+            self.logger.info(f'Starting BCP export to {compressed_file}')
             
             # Create a named pipe (FIFO) for BCP output
             # This ensures clean separation between stdout (data) and stderr (progress messages)
             fifo_path = compressed_file.replace('.csv.gz', '.fifo')
+            self.logger.info(f'Creating named pipe: {fifo_path}')
             try:
                 # Create the named pipe
                 os.mkfifo(fifo_path)
+                self.logger.info(f'Named pipe created successfully')
                 
                 # Open the FIFO for reading (this will block until a writer opens it)
                 # Start gzip process to read from the named pipe and write to compressed file
+                self.logger.info(f'Opening compressed file and FIFO for reading')
                 with open(compressed_file, 'wb') as gz_file:
+                    self.logger.info(f'Compressed file opened: {compressed_file}')
                     with open(fifo_path, 'rb') as fifo_read:
+                        self.logger.info(f'FIFO opened for reading (waiting for writer)')
+                        
+                        self.logger.info(f'Starting gzip process')
                         gzip_process = subprocess.Popen(
                             ['gzip', '-c'],  # -c writes to stdout instead of replacing input file
                             stdin=fifo_read,
                             stdout=gz_file,
                             stderr=subprocess.PIPE,
                         )
+                        self.logger.info(f'Gzip process started (PID: {gzip_process.pid})')
                         
                         # Update BCP command to write to the named pipe instead of stdout
                         bcp_cmd_fifo = bcp_cmd.copy()
                         # Replace '/dev/stdout' with the fifo path (always at index after 'queryout')
                         stdout_idx = bcp_cmd_fifo.index('/dev/stdout')
                         bcp_cmd_fifo[stdout_idx] = fifo_path
+                        self.logger.info(f'BCP command updated to write to FIFO: {fifo_path}')
                         
                         # Start BCP process to write to the named pipe
+                        self.logger.info(f'Starting BCP process')
                         bcp_process = subprocess.Popen(
                             bcp_cmd_fifo,
                             stdout=subprocess.PIPE,  # Not used, but required
                             stderr=subprocess.PIPE,
                             text=False,
                         )
+                        self.logger.info(f'BCP process started (PID: {bcp_process.pid})')
                         
                         # Wait for BCP process to complete first
                         # BCP writes data to FIFO (not stdout), so we only read stderr
+                        self.logger.info(f'Waiting for BCP process to complete...')
                         bcp_returncode = bcp_process.wait()
+                        self.logger.info(f'BCP process completed with return code: {bcp_returncode}')
                         
                         # Read BCP stderr after process completes (summary message is in stderr)
+                        self.logger.info(f'Reading BCP stderr...')
                         bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
+                        self.logger.info(f'BCP stderr read ({len(bcp_stderr)} bytes)')
                         
                         # Close stdout (not used, but close it to avoid issues)
                         bcp_process.stdout.close()
+                        self.logger.info(f'BCP stdout closed')
                         
                         # Wait for gzip to finish processing the FIFO data
+                        self.logger.info(f'Waiting for gzip process to complete...')
                         gzip_returncode = gzip_process.wait()
+                        self.logger.info(f'Gzip process completed with return code: {gzip_returncode}')
                 
             finally:
                 # Clean up the named pipe
