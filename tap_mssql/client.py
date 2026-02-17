@@ -569,7 +569,9 @@ class mssqlStream(SQLStream):
                     else:
                         val_str = start_val.strftime("'%Y-%m-%d'")
                 elif isinstance(start_val, str):
-                    val_str = f"'{start_val.replace("'", "''")}'"
+                    # Escape single quotes in SQL by doubling them
+                    escaped_val = start_val.replace("'", "''")
+                    val_str = f"'{escaped_val}'"
                 else:
                     val_str = str(start_val)
                 
