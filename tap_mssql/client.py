@@ -654,7 +654,7 @@ class mssqlStream(SQLStream):
                 return
             
             if os.path.getsize(csv_file) == 0:
-                self.logger.debug(f'BCP output file is empty: {csv_file}')
+                self.logger.info(f'BCP output file is empty: {csv_file}')
                 return
 
             with open(csv_file, 'r', encoding='utf-8', errors='replace') as f:
@@ -765,7 +765,14 @@ class mssqlStream(SQLStream):
             # Build and execute BCP command
             bcp_cmd = self._build_bcp_command(sql_query, temp_file)
             
-            self.logger.debug(f'Executing BCP command: bcp "..." queryout {temp_file}')
+            # Log BCP command (hide password for security)
+            bcp_cmd_safe = bcp_cmd.copy()
+            if '-P' in bcp_cmd_safe:
+                pwd_idx = bcp_cmd_safe.index('-P')
+                if pwd_idx + 1 < len(bcp_cmd_safe):
+                    bcp_cmd_safe[pwd_idx + 1] = '***'
+            self.logger.info(f'Executing BCP: {" ".join(bcp_cmd_safe)}')
+            self.logger.info(f'BCP SQL query: {sql_query}')
             
             # Execute BCP command
             result = subprocess.run(
