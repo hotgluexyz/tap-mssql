@@ -625,13 +625,11 @@ class mssqlStream(SQLStream):
     def _build_bcp_command(
         self,
         sql_query: str,
-        output_file: str | None = None,
     ) -> list[str]:
         """Build BCP command arguments.
 
         Args:
             sql_query: SQL query string to execute.
-            output_file: Path to output CSV file. If None, outputs to stdout.
 
         Returns:
             List of command arguments for subprocess.
@@ -653,11 +651,12 @@ class mssqlStream(SQLStream):
 
         # BCP expects the query as a quoted string argument
         # The query should be wrapped in quotes for the command
+        # Always use /dev/stdout - will be replaced with FIFO path when needed
         cmd = [
             'bcp',
             sql_query,  # The query string will be passed as-is, subprocess handles quoting
             'queryout',
-            output_file if output_file else '/dev/stdout',
+            '/dev/stdout',
             '-S', server,
             '-d', database,
             '-U', user,
@@ -803,7 +802,7 @@ class mssqlStream(SQLStream):
 
         try:
             # Build BCP command to output to stdout
-            bcp_cmd = self._build_bcp_command(sql_query, output_file=None)
+            bcp_cmd = self._build_bcp_command(sql_query)
             
             # Log BCP command (hide password for security)
             bcp_cmd_safe = bcp_cmd.copy()
@@ -817,54 +816,85 @@ class mssqlStream(SQLStream):
             # Time BCP and compression
             bcp_start_time = time.time()
             
-            # Open gzip file for writing
-            with open(compressed_file, 'wb') as gz_file:
-                # Start BCP process with stdout piped and stderr piped
-                bcp_process = subprocess.Popen(
-                    bcp_cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=False,  # Keep binary mode - stdout goes to gzip
-                )
+            # Create a named pipe (FIFO) for BCP output
+            # This ensures clean separation between stdout (data) and stderr (progress messages)
+            fifo_path = compressed_file.replace('.csv.gz', '.fifo')
+            try:
+                # Create the named pipe
+                os.mkfifo(fifo_path)
                 
-                # Start gzip process to compress BCP output
-                gzip_process = subprocess.Popen(
-                    ['gzip'],
-                    stdin=bcp_process.stdout,
-                    stdout=gz_file,
-                    stderr=subprocess.PIPE,
-                )
+                # Open the FIFO for reading (this will block until a writer opens it)
+                # Start gzip process to read from the named pipe and write to compressed file
+                with open(compressed_file, 'wb') as gz_file:
+                    with open(fifo_path, 'rb') as fifo_read:
+                        gzip_process = subprocess.Popen(
+                            ['gzip', '-c'],  # -c writes to stdout instead of replacing input file
+                            stdin=fifo_read,
+                            stdout=gz_file,
+                            stderr=subprocess.PIPE,
+                        )
+                        
+                        # Update BCP command to write to the named pipe instead of stdout
+                        bcp_cmd_fifo = bcp_cmd.copy()
+                        # Replace '/dev/stdout' with the fifo path (always at index after 'queryout')
+                        stdout_idx = bcp_cmd_fifo.index('/dev/stdout')
+                        bcp_cmd_fifo[stdout_idx] = fifo_path
+                        
+                        # Start BCP process to write to the named pipe
+                        bcp_process = subprocess.Popen(
+                            bcp_cmd_fifo,
+                            stdout=subprocess.PIPE,  # Not used, but required
+                            stderr=subprocess.PIPE,
+                            text=False,
+                        )
+                        
+                        # Read BCP stdout and stderr (summary message can be in either)
+                        # Note: stdout data goes to FIFO, but summary messages might appear here too
+                        bcp_stdout = bcp_process.stdout.read().decode('utf-8', errors='replace')
+                        bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
+                        
+                        # Wait for both processes to complete
+                        bcp_returncode = bcp_process.wait()
+                        gzip_returncode = gzip_process.wait()
                 
-                # Close BCP's stdout to allow it to receive SIGPIPE if gzip exits
-                bcp_process.stdout.close()
-                
-                # Read BCP stderr (this will block until stderr is closed)
-                bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
-                
-                # Wait for both processes to complete
-                bcp_returncode = bcp_process.wait()
-                gzip_returncode = gzip_process.wait()
+            finally:
+                # Clean up the named pipe
+                try:
+                    if os.path.exists(fifo_path):
+                        os.remove(fifo_path)
+                except Exception as e:
+                    self.logger.warning(f'Failed to remove named pipe {fifo_path}: {e}')
             
-            # Parse BCP stderr to extract record count
+            # Parse BCP stdout and stderr to extract record count
+            # Summary message can appear in either stdout or stderr
             record_count = 0  # Initialize record count
-            bcp_stderr_lines = []
+            bcp_output_lines = []
+            
+            # Collect lines from both stdout and stderr
+            if bcp_stdout:
+                for line in bcp_stdout.strip().split('\n'):
+                    line = line.strip()
+                    if line:
+                        bcp_output_lines.append(line)
+                        self.logger.debug(f'BCP stdout: {line}')
+            
             if bcp_stderr:
                 for line in bcp_stderr.strip().split('\n'):
                     line = line.strip()
                     if line:
-                        bcp_stderr_lines.append(line)
-                        self.logger.debug(f'BCP: {line}')
-                
-                # Parse final record count from stderr output
-                # Look for the final "X rows copied." message
-                if bcp_stderr_lines:
-                    # Log last few stderr lines for debugging
-                    self.logger.debug(f'BCP stderr last 5 lines: {bcp_stderr_lines[-5:]}')
+                        bcp_output_lines.append(line)
+                        self.logger.debug(f'BCP stderr: {line}')
+            
+            # Parse final record count from combined output
+            # Look for the final "X rows copied." message
+            if bcp_output_lines:
+                    # Log last few output lines for debugging
+                    self.logger.debug(f'BCP output last 5 lines: {bcp_output_lines[-5:]}')
                     
                     # Search for the final "X rows copied." message (usually at the end)
                     # The message format is: "                                                          100000 rows copied."
                     # with leading whitespace and optional period
-                    for line in reversed(bcp_stderr_lines):
+                    for line in reversed(bcp_output_lines):
                         # Match pattern like "100000 rows copied." (with optional leading/trailing whitespace and period)
                         # More flexible pattern to handle various formats
                         match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
@@ -875,9 +905,9 @@ class mssqlStream(SQLStream):
                     
                     # If not found, try alternative pattern and log for debugging
                     if record_count == 0:
-                        self.logger.warning(f'Could not parse record count from BCP stderr. Last 10 lines: {bcp_stderr_lines[-10:]}')
+                        self.logger.warning(f'Could not parse record count from BCP output. Last 10 lines: {bcp_output_lines[-10:]}')
                         # Try alternative pattern - look for any line with "rows copied"
-                        for line in reversed(bcp_stderr_lines):
+                        for line in reversed(bcp_output_lines):
                             # Try matching just numbers followed by "rows" and "copied" anywhere in line
                             match = re.search(r'(\d+)\s+rows?', line, re.IGNORECASE)
                             if match and 'copied' in line.lower():
@@ -885,29 +915,29 @@ class mssqlStream(SQLStream):
                                 self.logger.info(f'Parsed record count using alternative pattern: {record_count:,} rows')
                                 break
                     
-                    # If not found, log all stderr lines for debugging
+                    # If not found, log all output lines for debugging
                     if record_count == 0:
-                        self.logger.warning(f'Could not parse record count from BCP stderr. Last 10 lines: {bcp_stderr_lines[-10:]}')
-                
-                # Read and log gzip stderr if any
-                gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
+                        self.logger.warning(f'Could not parse record count from BCP output. Last 10 lines: {bcp_output_lines[-10:]}')
+            
+            # Read and log gzip stderr if any
+            gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
+            if gzip_stderr:
+                self.logger.debug(f'gzip: {gzip_stderr}')
+            
+            # Check for errors
+            if bcp_returncode != 0:
+                error_msg = f'BCP command failed with return code {bcp_returncode}'
+                if bcp_output_lines:
+                    error_msg += f': {" ".join(bcp_output_lines[-5:])}'  # Last 5 lines
+                self.logger.error(error_msg)
+                raise RuntimeError(error_msg)
+            
+            if gzip_returncode != 0:
+                error_msg = f'gzip command failed with return code {gzip_returncode}'
                 if gzip_stderr:
-                    self.logger.debug(f'gzip: {gzip_stderr}')
-                
-                # Check for errors
-                if bcp_returncode != 0:
-                    error_msg = f'BCP command failed with return code {bcp_returncode}'
-                    if bcp_stderr_lines:
-                        error_msg += f': {" ".join(bcp_stderr_lines[-5:])}'  # Last 5 lines
-                    self.logger.error(error_msg)
-                    raise RuntimeError(error_msg)
-                
-                if gzip_returncode != 0:
-                    error_msg = f'gzip command failed with return code {gzip_returncode}'
-                    if gzip_stderr:
-                        error_msg += f': {gzip_stderr}'
-                    self.logger.error(error_msg)
-                    raise RuntimeError(error_msg)
+                    error_msg += f': {gzip_stderr}'
+                self.logger.error(error_msg)
+                raise RuntimeError(error_msg)
                 
             
             bcp_end_time = time.time()
