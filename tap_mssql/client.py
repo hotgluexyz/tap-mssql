@@ -533,7 +533,11 @@ class mssqlStream(SQLStream):
             from_clause = f'[{database}].dbo.[{table_name}]'
 
         # Build SELECT clause (with TOP if needed)
-        if self.ABORT_AT_RECORD_COUNT is not None:
+        # Check for max_records config first, then ABORT_AT_RECORD_COUNT
+        max_records = self.config.get('max_records')
+        if max_records is not None:
+            select_clause = f'SELECT TOP {max_records} {column_list}'
+        elif self.ABORT_AT_RECORD_COUNT is not None:
             limit_val = self.ABORT_AT_RECORD_COUNT + 1
             select_clause = f'SELECT TOP {limit_val} {column_list}'
         else:

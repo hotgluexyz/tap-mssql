@@ -176,6 +176,11 @@ class Tapmssql(SQLTap):
             default=False,
             description="Turn on Higher Defined(HD) JSON Schema types to assist Targets"
         ),
+        th.Property(
+            "max_records",
+            th.IntegerType,
+            description="Maximum number of records to export per stream"
+        ),
     ).to_dict()
 
     def discover_streams(self) -> list[SQLStream]:
