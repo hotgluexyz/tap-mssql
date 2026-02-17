@@ -915,12 +915,9 @@ class mssqlStream(SQLStream):
                     raise RuntimeError(error_msg)
                 
             finally:
-                # Clean up BCP log file
-                try:
-                    if os.path.exists(bcp_log_file):
-                        os.remove(bcp_log_file)
-                except Exception as e:
-                    self.logger.warning(f'Failed to remove BCP log file {bcp_log_file}: {e}')
+                # Keep the BCP log file - don't delete it
+                # The log file contains progress messages and is useful for debugging
+                pass
             
             bcp_end_time = time.time()
             bcp_duration = bcp_end_time - bcp_start_time
