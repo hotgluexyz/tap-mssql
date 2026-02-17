@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import os
 import csv
+import time
 
 from base64 import b64encode
 from decimal import Decimal
@@ -774,6 +775,8 @@ class mssqlStream(SQLStream):
             self.logger.info(f'Executing BCP: {" ".join(bcp_cmd_safe)}')
             self.logger.info(f'BCP SQL query: {sql_query}')
             
+            # Time BCP CSV creation
+            bcp_start_time = time.time()
             # Execute BCP command
             result = subprocess.run(
                 bcp_cmd,
@@ -781,6 +784,8 @@ class mssqlStream(SQLStream):
                 text=True,
                 check=False,  # We'll check the return code manually
             )
+            bcp_end_time = time.time()
+            bcp_duration = bcp_end_time - bcp_start_time
 
             if result.returncode != 0:
                 error_msg = f'BCP command failed with return code {result.returncode}'
@@ -791,10 +796,14 @@ class mssqlStream(SQLStream):
                 self.logger.error(error_msg)
                 raise RuntimeError(error_msg)
 
-            # Parse BCP CSV output
+            self.logger.info(f'BCP CSV creation completed in {bcp_duration:.2f} seconds')
+
+            # Parse BCP CSV output and transform to records
             # Get schema properties to handle type conversions if needed
             properties = self.schema.get('properties', {})
             
+            transform_start_time = time.time()
+            record_count = 0
             for record in self._parse_bcp_csv(temp_file, selected_column_names):
                 # Convert string values to appropriate types for post_process
                 # This handles cases where CSV gives us strings but post_process expects specific types
@@ -812,6 +821,7 @@ class mssqlStream(SQLStream):
                                 # If conversion fails, leave as is
                                 pass
                 
+                record_count += 1
                 yield record
                 # Post-process the record (same as before)
                 # transformed_record = self.post_process(record)
@@ -819,6 +829,10 @@ class mssqlStream(SQLStream):
                 #     # Record filtered out during post_process()
                 #     continue
                 # yield transformed_record
+            
+            transform_end_time = time.time()
+            transform_duration = transform_end_time - transform_start_time
+            self.logger.info(f'Transformed {record_count} records to Singer format in {transform_duration:.2f} seconds')
 
         finally:
             # Clean up temporary file
