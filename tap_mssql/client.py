@@ -817,47 +817,42 @@ class mssqlStream(SQLStream):
             # Time BCP and compression
             bcp_start_time = time.time()
             
-            # Create temporary log file for BCP stderr (progress messages)
-            bcp_log_fd, bcp_log_file = tempfile.mkstemp(suffix='.log', prefix='bcp_stderr_')
-            os.close(bcp_log_fd)  # Close file descriptor, we'll use the path
-            
-            try:
-                # Open gzip file for writing
-                with open(compressed_file, 'wb') as gz_file:
-                    # Open BCP stderr log file for writing
-                    with open(bcp_log_file, 'wb') as log_file:
-                        # Start BCP process with stdout piped and stderr redirected to log file
-                        bcp_process = subprocess.Popen(
-                            bcp_cmd,
-                            stdout=subprocess.PIPE,
-                            stderr=log_file,  # Redirect stderr to log file
-                            text=False,  # Keep binary mode - stdout goes to gzip
-                        )
-                        
-                        # Start gzip process to compress BCP output
-                        gzip_process = subprocess.Popen(
-                            ['gzip'],
-                            stdin=bcp_process.stdout,
-                            stdout=gz_file,
-                            stderr=subprocess.PIPE,
-                        )
-                        
-                        # Close BCP's stdout to allow it to receive SIGPIPE if gzip exits
-                        bcp_process.stdout.close()
-                        
-                        # Wait for both processes to complete
-                        bcp_returncode = bcp_process.wait()
-                        gzip_returncode = gzip_process.wait()
+            # Open gzip file for writing
+            with open(compressed_file, 'wb') as gz_file:
+                # Start BCP process with stdout piped and stderr piped
+                bcp_process = subprocess.Popen(
+                    bcp_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=False,  # Keep binary mode - stdout goes to gzip
+                )
                 
-                # Read BCP stderr log file to parse record count
-                bcp_stderr_lines = []
-                if os.path.exists(bcp_log_file):
-                    with open(bcp_log_file, 'r', encoding='utf-8', errors='replace') as log:
-                        for line in log:
-                            line = line.strip()
-                            if line:
-                                bcp_stderr_lines.append(line)
-                                self.logger.debug(f'BCP: {line}')
+                # Start gzip process to compress BCP output
+                gzip_process = subprocess.Popen(
+                    ['gzip'],
+                    stdin=bcp_process.stdout,
+                    stdout=gz_file,
+                    stderr=subprocess.PIPE,
+                )
+                
+                # Close BCP's stdout to allow it to receive SIGPIPE if gzip exits
+                bcp_process.stdout.close()
+                
+                # Read BCP stderr (this will block until stderr is closed)
+                bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
+                
+                # Wait for both processes to complete
+                bcp_returncode = bcp_process.wait()
+                gzip_returncode = gzip_process.wait()
+            
+            # Parse BCP stderr to extract record count
+            bcp_stderr_lines = []
+            if bcp_stderr:
+                for line in bcp_stderr.strip().split('\n'):
+                    line = line.strip()
+                    if line:
+                        bcp_stderr_lines.append(line)
+                        self.logger.debug(f'BCP: {line}')
                 
                 # Parse final record count from stderr output
                 # Look for the final "X rows copied." message
@@ -914,10 +909,6 @@ class mssqlStream(SQLStream):
                     self.logger.error(error_msg)
                     raise RuntimeError(error_msg)
                 
-            finally:
-                # Keep the BCP log file - don't delete it
-                # The log file contains progress messages and is useful for debugging
-                pass
             
             bcp_end_time = time.time()
             bcp_duration = bcp_end_time - bcp_start_time
