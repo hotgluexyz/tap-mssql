@@ -28,6 +28,10 @@ from sqlalchemy.engine.url import URL
 from singer_sdk import SQLConnector, SQLStream
 from singer_sdk.batch import BaseBatcher, lazy_chunked_generator
 
+# Get output directory from environment variables
+job_root = os.environ.get("JOB_ROOT")
+job_id = os.environ.get("JOB_ID", "")
+LOCAL_OUTPUT_DIR = f"/home/hotglue/{job_id}/sync-output" if job_root else f"../.secrets"
 
 class mssqlConnector(SQLConnector):
     """Connects to the mssql SQL source."""
@@ -758,9 +762,12 @@ class mssqlStream(SQLStream):
         # Build SQL query string
         sql_query = self._build_sql_query_string(selected_column_names, context)
 
-        # Create final compressed file
-        temp_fd, compressed_file = tempfile.mkstemp(suffix='.csv.gz', prefix='bcp_export_')
-        os.close(temp_fd)  # Close file descriptor, we'll use the path
+        # Create output directory if it doesn't exist
+        os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+        
+        # Create output file name: {stream}.csv.gz
+        stream_name = self.name
+        compressed_file = os.path.join(LOCAL_OUTPUT_DIR, f"{stream_name}.csv.gz")
 
         try:
             # Build BCP command to output to stdout
