@@ -17,6 +17,8 @@ from base64 import b64encode
 from decimal import Decimal
 from uuid import uuid4
 from typing import Any, Iterable, Iterator
+import threading
+import re
 
 import pendulum
 import pyodbc
@@ -27,6 +29,7 @@ from sqlalchemy.engine.url import URL
 
 from singer_sdk import SQLConnector, SQLStream
 from singer_sdk.batch import BaseBatcher, lazy_chunked_generator
+from singer_sdk.metrics import Counter
 
 # Get output directory from environment variables
 job_root = os.environ.get("JOB_ROOT")
@@ -492,6 +495,36 @@ class mssqlStream(SQLStream):
 
     connector_class = mssqlConnector
 
+    def _emit_record_count_metric(self, record_count: int) -> None:
+        """Utility function to create and emit a record count metric.
+        
+        Args:
+            record_count: The number of records to report in the metric.
+        """
+        metric = Counter(
+            metric="record_count",
+            value=record_count,
+            tags={"stream": self.name},
+        )
+        # Write the metric message directly using the tap's write method
+        try:
+            if hasattr(self, 'tap') and self.tap and hasattr(self.tap, '_write_message'):
+                self.tap._write_message(metric)
+            elif hasattr(self, '_write_message'):
+                self._write_message(metric)
+            else:
+                # Fallback: construct and print the metric message manually
+                metric_dict = {
+                    "type": "METRIC",
+                    "metric": "record_count",
+                    "value": record_count,
+                    "tags": {"stream": self.name}
+                }
+                print(json.dumps(metric_dict), flush=True)
+        except Exception as e:
+            # If metric emission fails, log it
+            self.logger.warning(f'Failed to emit metric: {e}')
+
     def _build_sql_query_string(
         self,
         selected_columns: list[str],
@@ -785,6 +818,12 @@ class mssqlStream(SQLStream):
             # Time BCP and compression
             bcp_start_time = time.time()
             
+            # Track record count and emit metrics every 1,000,000 records
+            record_count = 0
+            last_metric_milestone = [0]  # Use list to allow modification in nested function
+            metric_interval = 1000000
+            bcp_stderr_lines = []
+            
             # Open gzip file for writing
             with open(compressed_file, 'wb') as gz_file:
                 # Start BCP process with stdout piped
@@ -792,7 +831,7 @@ class mssqlStream(SQLStream):
                     bcp_cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    text=False,  # Use binary mode for piping to gzip
+                    text=False,  # Keep binary mode - stdout goes to gzip, stderr we'll decode ourselves
                 )
                 
                 # Start gzip process to compress BCP output
@@ -806,19 +845,54 @@ class mssqlStream(SQLStream):
                 # Close BCP's stdout to allow it to receive SIGPIPE if gzip exits
                 bcp_process.stdout.close()
                 
+                # Read BCP stderr in real-time to track progress
+                def read_stderr():
+                    nonlocal record_count
+                    # Read stderr as binary and decode line by line
+                    for line_bytes in iter(bcp_process.stderr.readline, b''):
+                        if not line_bytes:
+                            break
+                        line = line_bytes.decode('utf-8', errors='replace').strip()
+                        if line:
+                            bcp_stderr_lines.append(line)
+                            self.logger.debug(f'BCP: {line}')
+                            
+                            # Parse progress messages like "1000 rows successfully bulk-copied to host-file. Total received: 2000"
+                            # or "2500 rows copied."
+                            match = re.search(r'Total received:\s*(\d+)', line, re.IGNORECASE)
+                            if not match:
+                                match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
+                            
+                            if match:
+                                current_count = int(match.group(1))
+                                record_count = max(record_count, current_count)
+                                
+                                # Emit metric every 1,000,000 records
+                                if record_count >= last_metric_milestone[0] + metric_interval:
+                                    milestone = (record_count // metric_interval) * metric_interval
+                                    self._emit_record_count_metric(milestone)
+                                    last_metric_milestone[0] = milestone
+                                    self.logger.info(f'Emitted metric for {milestone:,} records')
+                
+                # Start reading stderr in a separate thread
+                stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+                stderr_thread.start()
+                
                 # Wait for both processes to complete
                 bcp_returncode = bcp_process.wait()
                 gzip_returncode = gzip_process.wait()
                 
-                # Read and log BCP stderr (contains progress messages)
-                bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
-                if bcp_stderr:
-                    # Log BCP progress messages at debug level (they're informational)
-                    # Filter out the "Starting copy..." and other verbose messages
-                    for line in bcp_stderr.strip().split('\n'):
-                        if line.strip():
-                            # Log important info like row counts, but at debug level
-                            self.logger.debug(f'BCP: {line}')
+                # Wait for stderr reading thread to finish
+                stderr_thread.join(timeout=5)
+                
+                # Get final record count from the last line if not already captured
+                if record_count == 0 and bcp_stderr_lines:
+                    # Try to parse final count from last messages
+                    for line in reversed(bcp_stderr_lines):
+                        match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
+                        if match:
+                            record_count = int(match.group(1))
+                            break
                 
                 # Read and log gzip stderr if any
                 gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
@@ -828,8 +902,8 @@ class mssqlStream(SQLStream):
                 # Check for errors
                 if bcp_returncode != 0:
                     error_msg = f'BCP command failed with return code {bcp_returncode}'
-                    if bcp_stderr:
-                        error_msg += f': {bcp_stderr}'
+                    if bcp_stderr_lines:
+                        error_msg += f': {" ".join(bcp_stderr_lines[-5:])}'  # Last 5 lines
                     self.logger.error(error_msg)
                     raise RuntimeError(error_msg)
                 
@@ -852,13 +926,22 @@ class mssqlStream(SQLStream):
                 f'Compressed file: {compressed_file} ({compressed_size_mb:.2f} MB)'
             )
             
-            # Don't yield any records - all data is in the CSV.gz file
-            # The SDK will output SCHEMA messages automatically when the stream syncs
-            # Even if no records are yielded, the schema should still be output
-            # because the SDK outputs schema before calling get_records()
+            # Emit final record count metric if not already emitted at a milestone
+            # This ensures we report the total count even if it's not exactly at a 1M milestone
+            if record_count > 0:
+                metric_interval = 1000000
+                last_milestone = (record_count // metric_interval) * metric_interval
+                # Emit final metric if we haven't already emitted it at a milestone
+                # or if the count is different from the last milestone emitted
+                if record_count > last_metric_milestone[0]:
+                    self._emit_record_count_metric(record_count)
+                    self.logger.info(f'Emitted final metric for {record_count:,} records')
+                else:
+                    # Final count was already emitted at the milestone
+                    self.logger.info(f'Final record count: {record_count:,} (already emitted at milestone)')
             
+            # Don't yield any records - all data is in the CSV.gz file
             # Return empty generator (function must be a generator, even if it yields nothing)
-            # Using an empty generator to satisfy the iterable requirement
             if False:
                 yield  # This makes the function a generator
             
