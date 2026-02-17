@@ -848,13 +848,17 @@ class mssqlStream(SQLStream):
                             text=False,
                         )
                         
-                        # Read BCP stdout and stderr (summary message can be in either)
-                        # Note: stdout data goes to FIFO, but summary messages might appear here too
-                        bcp_stdout = bcp_process.stdout.read().decode('utf-8', errors='replace')
+                        # Wait for BCP process to complete first
+                        # BCP writes data to FIFO (not stdout), so we only read stderr
+                        bcp_returncode = bcp_process.wait()
+                        
+                        # Read BCP stderr after process completes (summary message is in stderr)
                         bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
                         
-                        # Wait for both processes to complete
-                        bcp_returncode = bcp_process.wait()
+                        # Close stdout (not used, but close it to avoid issues)
+                        bcp_process.stdout.close()
+                        
+                        # Wait for gzip to finish processing the FIFO data
                         gzip_returncode = gzip_process.wait()
                 
             finally:
@@ -865,18 +869,10 @@ class mssqlStream(SQLStream):
                 except Exception as e:
                     self.logger.warning(f'Failed to remove named pipe {fifo_path}: {e}')
             
-            # Parse BCP stdout and stderr to extract record count
-            # Summary message can appear in either stdout or stderr
+            # Parse BCP stderr to extract record count
+            # Summary message appears in stderr
             record_count = 0  # Initialize record count
             bcp_output_lines = []
-            
-            # Collect lines from both stdout and stderr
-            if bcp_stdout:
-                for line in bcp_stdout.strip().split('\n'):
-                    line = line.strip()
-                    if line:
-                        bcp_output_lines.append(line)
-                        self.logger.debug(f'BCP stdout: {line}')
             
             if bcp_stderr:
                 for line in bcp_stderr.strip().split('\n'):
