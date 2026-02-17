@@ -797,47 +797,18 @@ class mssqlStream(SQLStream):
                 raise RuntimeError(error_msg)
 
             self.logger.info(f'BCP CSV creation completed in {bcp_duration:.2f} seconds')
-
-            # Parse BCP CSV output and transform to records
-            # Get schema properties to handle type conversions if needed
-            properties = self.schema.get('properties', {})
             
-            transform_start_time = time.time()
-            record_count = 0
-            for record in self._parse_bcp_csv(temp_file, selected_column_names):
-                # Convert string values to appropriate types for post_process
-                # This handles cases where CSV gives us strings but post_process expects specific types
-                for key, value in record.items():
-                    if value is not None and isinstance(value, str):
-                        property_schema = properties.get(key, {})
-                        # For base64 fields, convert string to bytes if needed
-                        if property_schema.get('contentEncoding') == 'base64':
-                            try:
-                                # Try to decode the string as if it's already base64, or convert to bytes
-                                # BCP might output binary as hex or base64 already
-                                # For now, encode the string as UTF-8 bytes
-                                record[key] = value.encode('utf-8')
-                            except Exception:
-                                # If conversion fails, leave as is
-                                pass
-                
-                record_count += 1
-                yield record
-                # Post-process the record (same as before)
-                # transformed_record = self.post_process(record)
-                # if transformed_record is None:
-                #     # Record filtered out during post_process()
-                #     continue
-                # yield transformed_record
+            # Get file size for logging
+            file_size = os.path.getsize(temp_file)
+            file_size_mb = file_size / (1024 * 1024)
+            self.logger.info(f'CSV file created: {temp_file} ({file_size_mb:.2f} MB)')
             
-            transform_end_time = time.time()
-            transform_duration = transform_end_time - transform_start_time
-            self.logger.info(f'Transformed {record_count} records to Singer format in {transform_duration:.2f} seconds')
-
+            # Don't yield any records - all data is in the CSV file
+            # The SDK will output SCHEMA messages automatically when the stream syncs
+            # Even if no records are yielded, the schema should still be output
+            # because the SDK outputs schema before calling get_records()
+            
         finally:
-            # Clean up temporary file
-            try:
-                if os.path.exists(temp_file):
-                    os.remove(temp_file)
-            except Exception as e:
-                self.logger.warning(f'Failed to remove temporary file {temp_file}: {e}')
+            # Keep the CSV file - don't delete it
+            # The file is at temp_file location and contains all the data
+            pass
