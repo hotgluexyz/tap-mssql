@@ -822,6 +822,10 @@ class mssqlStream(SQLStream):
             fifo_path = compressed_file.replace('.csv.gz', '.csv')
             self.logger.info(f'Step 1: Creating named pipe: {fifo_path}')
             try:
+                # Remove FIFO if it already exists (from previous run)
+                if os.path.exists(fifo_path):
+                    self.logger.info(f'Removing existing FIFO: {fifo_path}')
+                    os.remove(fifo_path)
                 os.mkfifo(fifo_path)
                 self.logger.info(f'Named pipe created: {fifo_path}')
                 
