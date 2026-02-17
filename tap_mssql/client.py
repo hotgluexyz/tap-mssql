@@ -36,9 +36,6 @@ job_root = os.environ.get("JOB_ROOT")
 job_id = os.environ.get("JOB_ID", "")
 LOCAL_OUTPUT_DIR = f"/home/hotglue/{job_id}/sync-output" if job_root else f"../.secrets"
 
-# Metric emission interval (emit metrics every N records)
-METRIC_INTERVAL = 20000
-
 class mssqlConnector(SQLConnector):
     """Connects to the mssql SQL source."""
 
@@ -821,9 +818,7 @@ class mssqlStream(SQLStream):
             # Time BCP and compression
             bcp_start_time = time.time()
             
-            # Track record count and emit metrics every 1,000,000 records
-            record_count = 0
-            last_metric_milestone = [0]  # Use list to allow modification in nested function
+            # Track BCP stderr output to parse final record count
             bcp_stderr_lines = []
             
             # Open gzip file for writing
@@ -847,9 +842,8 @@ class mssqlStream(SQLStream):
                 # Close BCP's stdout to allow it to receive SIGPIPE if gzip exits
                 bcp_process.stdout.close()
                 
-                # Read BCP stderr in real-time to track progress
+                # Read BCP stderr to collect output
                 def read_stderr():
-                    nonlocal record_count
                     # Read stderr as binary and decode line by line
                     for line_bytes in iter(bcp_process.stderr.readline, b''):
                         if not line_bytes:
@@ -858,23 +852,6 @@ class mssqlStream(SQLStream):
                         if line:
                             bcp_stderr_lines.append(line)
                             self.logger.debug(f'BCP: {line}')
-                            
-                            # Parse progress messages like "1000 rows successfully bulk-copied to host-file. Total received: 2000"
-                            # or "2500 rows copied."
-                            match = re.search(r'Total received:\s*(\d+)', line, re.IGNORECASE)
-                            if not match:
-                                match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
-                            
-                            if match:
-                                current_count = int(match.group(1))
-                                record_count = max(record_count, current_count)
-                                
-                                # Emit metric every 1,000,000 records
-                                if record_count >= last_metric_milestone[0] + METRIC_INTERVAL:
-                                    milestone = (record_count // METRIC_INTERVAL) * METRIC_INTERVAL
-                                    self._emit_record_count_metric(milestone)
-                                    last_metric_milestone[0] = milestone
-                                    self.logger.info(f'Emitted metric for {milestone:,} records')
                 
                 # Start reading stderr in a separate thread
                 stderr_thread = threading.Thread(target=read_stderr, daemon=True)
@@ -887,13 +864,17 @@ class mssqlStream(SQLStream):
                 # Wait for stderr reading thread to finish
                 stderr_thread.join(timeout=5)
                 
-                # Get final record count from the last line if not already captured
-                if record_count == 0 and bcp_stderr_lines:
-                    # Try to parse final count from last messages
+                # Parse final record count from stderr output
+                # Look for the final "X rows copied." message
+                record_count = 0
+                if bcp_stderr_lines:
+                    # Search for the final "X rows copied." message (usually at the end)
                     for line in reversed(bcp_stderr_lines):
-                        match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
+                        # Match pattern like "100000 rows copied." (with optional whitespace)
+                        match = re.search(r'(\d+)\s+rows?\s+copied\.?', line, re.IGNORECASE)
                         if match:
                             record_count = int(match.group(1))
+                            self.logger.info(f'Parsed final record count from BCP output: {record_count:,} rows')
                             break
                 
                 # Read and log gzip stderr if any
@@ -928,18 +909,10 @@ class mssqlStream(SQLStream):
                 f'Compressed file: {compressed_file} ({compressed_size_mb:.2f} MB)'
             )
             
-            # Emit final record count metric if not already emitted at a milestone
-            # This ensures we report the total count even if it's not exactly at a 1M milestone
+            # Emit final record count metric
             if record_count > 0:
-                last_milestone = (record_count // METRIC_INTERVAL) * METRIC_INTERVAL
-                # Emit final metric if we haven't already emitted it at a milestone
-                # or if the count is different from the last milestone emitted
-                if record_count > last_metric_milestone[0]:
-                    self._emit_record_count_metric(record_count)
-                    self.logger.info(f'Emitted final metric for {record_count:,} records')
-                else:
-                    # Final count was already emitted at the milestone
-                    self.logger.info(f'Final record count: {record_count:,} (already emitted at milestone)')
+                self._emit_record_count_metric(record_count)
+                self.logger.info(f'Emitted metric for {record_count:,} records')
             
             # Don't yield any records - all data is in the CSV.gz file
             # Return empty generator (function must be a generator, even if it yields nothing)
