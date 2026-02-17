@@ -18,6 +18,7 @@ from decimal import Decimal
 from uuid import uuid4
 from typing import Any, Iterable, Iterator
 import re
+import threading
 
 import pendulum
 import pyodbc
@@ -817,84 +818,94 @@ class mssqlStream(SQLStream):
             bcp_start_time = time.time()
             self.logger.info(f'Starting BCP export to {compressed_file}')
             
-            # Create a named pipe (FIFO) for BCP output
-            # This ensures clean separation between stdout (data) and stderr (progress messages)
-            fifo_path = compressed_file.replace('.csv.gz', '.fifo')
-            self.logger.info(f'Creating named pipe: {fifo_path}')
+            # Step 1: mkfifo data_export.csv
+            fifo_path = compressed_file.replace('.csv.gz', '.csv')
+            self.logger.info(f'Step 1: Creating named pipe: {fifo_path}')
             try:
-                # Create the named pipe
                 os.mkfifo(fifo_path)
-                self.logger.info(f'Named pipe created successfully')
+                self.logger.info(f'Named pipe created: {fifo_path}')
                 
-                # Start gzip process first - it will block on reading the FIFO until BCP opens it
-                # Open compressed file for writing
-                self.logger.info(f'Opening compressed file: {compressed_file}')
-                gz_file = open(compressed_file, 'wb')
-                self.logger.info(f'Compressed file opened')
+                # Step 2: gzip < data_export.csv > data_export.csv.gz & (run in background thread)
+                self.logger.info(f'Step 2: Starting gzip in background thread')
+                gzip_completed = threading.Event()
+                gzip_error = [None]
                 
-                # Open FIFO for reading (this will block until BCP opens it for writing)
-                self.logger.info(f'Opening FIFO for reading (will block until writer opens it)...')
-                fifo_read = open(fifo_path, 'rb')
-                self.logger.info(f'FIFO opened for reading')
+                def run_gzip():
+                    """Run gzip in background: gzip < fifo > output.gz"""
+                    try:
+                        self.logger.info(f'Gzip thread: Opening FIFO for reading...')
+                        with open(fifo_path, 'rb') as fifo_read:
+                            self.logger.info(f'Gzip thread: FIFO opened, opening output file...')
+                            with open(compressed_file, 'wb') as gz_file:
+                                self.logger.info(f'Gzip thread: Starting gzip process...')
+                                gzip_process = subprocess.Popen(
+                                    ['gzip', '-c'],
+                                    stdin=fifo_read,
+                                    stdout=gz_file,
+                                    stderr=subprocess.PIPE,
+                                )
+                                self.logger.info(f'Gzip thread: Gzip process started (PID: {gzip_process.pid})')
+                                gzip_returncode = gzip_process.wait()
+                                self.logger.info(f'Gzip thread: Gzip completed with return code {gzip_returncode}')
+                                if gzip_returncode != 0:
+                                    gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
+                                    gzip_error[0] = f'gzip failed: {gzip_stderr}'
+                    except Exception as e:
+                        gzip_error[0] = f'gzip thread error: {e}'
+                        self.logger.error(f'Gzip thread error: {e}')
+                    finally:
+                        gzip_completed.set()
+                        self.logger.info(f'Gzip thread: Completed')
                 
-                # Start gzip process to read from FIFO and write to compressed file
-                self.logger.info(f'Starting gzip process')
-                gzip_process = subprocess.Popen(
-                    ['gzip', '-c'],  # -c writes to stdout instead of replacing input file
-                    stdin=fifo_read,
-                    stdout=gz_file,
-                    stderr=subprocess.PIPE,
-                )
-                self.logger.info(f'Gzip process started (PID: {gzip_process.pid})')
+                gzip_thread = threading.Thread(target=run_gzip, daemon=False)
+                gzip_thread.start()
+                self.logger.info(f'Gzip thread started')
                 
-                # Update BCP command to write to the named pipe instead of stdout
+                # Step 3: bcp ... queryout data_export.csv ...
+                self.logger.info(f'Step 3: Starting BCP process')
                 bcp_cmd_fifo = bcp_cmd.copy()
-                # Replace '/dev/stdout' with the fifo path (always at index after 'queryout')
+                # Replace '/dev/stdout' with the fifo path
                 stdout_idx = bcp_cmd_fifo.index('/dev/stdout')
                 bcp_cmd_fifo[stdout_idx] = fifo_path
-                self.logger.info(f'BCP command updated to write to FIFO: {fifo_path}')
+                self.logger.info(f'BCP will write to FIFO: {fifo_path}')
                 
-                # Start BCP process to write to the named pipe (this will unblock gzip)
-                self.logger.info(f'Starting BCP process')
                 bcp_process = subprocess.Popen(
                     bcp_cmd_fifo,
-                    stdout=subprocess.PIPE,  # Not used, but required
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=False,
                 )
                 self.logger.info(f'BCP process started (PID: {bcp_process.pid})')
                 
-                # Wait for BCP process to complete first
-                # BCP writes data to FIFO (not stdout), so we only read stderr
+                # Wait for BCP to complete
                 self.logger.info(f'Waiting for BCP process to complete...')
                 bcp_returncode = bcp_process.wait()
                 self.logger.info(f'BCP process completed with return code: {bcp_returncode}')
                 
-                # Read BCP stderr after process completes (summary message is in stderr)
+                # Read BCP stderr
                 self.logger.info(f'Reading BCP stderr...')
                 bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
                 self.logger.info(f'BCP stderr read ({len(bcp_stderr)} bytes)')
-                
-                # Close stdout (not used, but close it to avoid issues)
                 bcp_process.stdout.close()
-                self.logger.info(f'BCP stdout closed')
                 
-                # Close FIFO and compressed file handles
-                self.logger.info(f'Closing FIFO and compressed file handles...')
-                fifo_read.close()
-                gz_file.close()
-                self.logger.info(f'File handles closed')
+                # Wait for gzip thread to complete
+                self.logger.info(f'Waiting for gzip thread to complete...')
+                gzip_thread.join(timeout=300)  # 5 minute timeout
+                if not gzip_completed.is_set():
+                    raise RuntimeError('Gzip thread timed out after 5 minutes')
                 
-                # Wait for gzip to finish processing the FIFO data
-                self.logger.info(f'Waiting for gzip process to complete...')
-                gzip_returncode = gzip_process.wait()
-                self.logger.info(f'Gzip process completed with return code: {gzip_returncode}')
+                if gzip_error[0]:
+                    raise RuntimeError(gzip_error[0])
+                
+                self.logger.info(f'Gzip thread completed successfully')
                 
             finally:
-                # Clean up the named pipe
+                # Step 4: rm data_export.csv
+                self.logger.info(f'Step 4: Removing named pipe: {fifo_path}')
                 try:
                     if os.path.exists(fifo_path):
                         os.remove(fifo_path)
+                        self.logger.info(f'Named pipe removed: {fifo_path}')
                 except Exception as e:
                     self.logger.warning(f'Failed to remove named pipe {fifo_path}: {e}')
             
@@ -944,11 +955,6 @@ class mssqlStream(SQLStream):
                     if record_count == 0:
                         self.logger.warning(f'Could not parse record count from BCP output. Last 10 lines: {bcp_output_lines[-10:]}')
             
-            # Read and log gzip stderr if any
-            gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
-            if gzip_stderr:
-                self.logger.debug(f'gzip: {gzip_stderr}')
-            
             # Check for errors
             if bcp_returncode != 0:
                 error_msg = f'BCP command failed with return code {bcp_returncode}'
@@ -957,12 +963,8 @@ class mssqlStream(SQLStream):
                 self.logger.error(error_msg)
                 raise RuntimeError(error_msg)
             
-            if gzip_returncode != 0:
-                error_msg = f'gzip command failed with return code {gzip_returncode}'
-                if gzip_stderr:
-                    error_msg += f': {gzip_stderr}'
-                self.logger.error(error_msg)
-                raise RuntimeError(error_msg)
+            # gzip error checking is done in the thread (gzip_error)
+            # If gzip_error[0] is set, it was already raised above
                 
             
             bcp_end_time = time.time()
