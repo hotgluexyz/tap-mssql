@@ -36,6 +36,9 @@ job_root = os.environ.get("JOB_ROOT")
 job_id = os.environ.get("JOB_ID", "")
 LOCAL_OUTPUT_DIR = f"/home/hotglue/{job_id}/sync-output" if job_root else f"../.secrets"
 
+# Metric emission interval (emit metrics every N records)
+METRIC_INTERVAL = 20000
+
 class mssqlConnector(SQLConnector):
     """Connects to the mssql SQL source."""
 
@@ -821,7 +824,6 @@ class mssqlStream(SQLStream):
             # Track record count and emit metrics every 1,000,000 records
             record_count = 0
             last_metric_milestone = [0]  # Use list to allow modification in nested function
-            metric_interval = 1000000
             bcp_stderr_lines = []
             
             # Open gzip file for writing
@@ -868,8 +870,8 @@ class mssqlStream(SQLStream):
                                 record_count = max(record_count, current_count)
                                 
                                 # Emit metric every 1,000,000 records
-                                if record_count >= last_metric_milestone[0] + metric_interval:
-                                    milestone = (record_count // metric_interval) * metric_interval
+                                if record_count >= last_metric_milestone[0] + METRIC_INTERVAL:
+                                    milestone = (record_count // METRIC_INTERVAL) * METRIC_INTERVAL
                                     self._emit_record_count_metric(milestone)
                                     last_metric_milestone[0] = milestone
                                     self.logger.info(f'Emitted metric for {milestone:,} records')
@@ -929,8 +931,7 @@ class mssqlStream(SQLStream):
             # Emit final record count metric if not already emitted at a milestone
             # This ensures we report the total count even if it's not exactly at a 1M milestone
             if record_count > 0:
-                metric_interval = 1000000
-                last_milestone = (record_count // metric_interval) * metric_interval
+                last_milestone = (record_count // METRIC_INTERVAL) * METRIC_INTERVAL
                 # Emit final metric if we haven't already emitted it at a milestone
                 # or if the count is different from the last milestone emitted
                 if record_count > last_metric_milestone[0]:
