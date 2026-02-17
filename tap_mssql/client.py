@@ -812,12 +812,13 @@ class mssqlStream(SQLStream):
                                 # If conversion fails, leave as is
                                 pass
                 
+                yield record
                 # Post-process the record (same as before)
-                transformed_record = self.post_process(record)
-                if transformed_record is None:
-                    # Record filtered out during post_process()
-                    continue
-                yield transformed_record
+                # transformed_record = self.post_process(record)
+                # if transformed_record is None:
+                #     # Record filtered out during post_process()
+                #     continue
+                # yield transformed_record
 
         finally:
             # Clean up temporary file
