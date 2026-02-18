@@ -494,24 +494,6 @@ class mssqlStream(SQLStream):
 
     connector_class = mssqlConnector
 
-    def _emit_record_count_metric(self, record_count: int) -> None:
-        """Utility function to create and emit a record count metric.
-        
-        Args:
-            record_count: The number of records to report in the metric.
-        """
-        # Construct the metric message in Singer format
-        metric_dict = {
-            "type": "counter",
-            "metric": "record_count",
-            "value": record_count,
-            "tags": {"stream": self.name}
-        }
-        
-        # Write the metric using singer_sdk.metrics logger (same format as SDK)
-        metric_logger = logging.getLogger("singer_sdk.metrics")
-        metric_logger.info(f"METRIC: {json.dumps(metric_dict)}")
-
     def _build_sql_query_string(
         self,
         selected_columns: list[str],
