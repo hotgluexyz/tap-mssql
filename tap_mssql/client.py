@@ -914,50 +914,40 @@ class mssqlStream(SQLStream):
                     self.logger.warning(f'Failed to remove named pipe {fifo_path}: {e}')
             
             # Parse BCP stderr to extract record count
-            # Summary message appears in stderr
+            # Summary message appears in stderr: "100000 rows copied."
             record_count = 0  # Initialize record count
             bcp_output_lines = []
             
             if bcp_stderr:
+                self.logger.info(f'BCP stderr content ({len(bcp_stderr)} bytes):\n{bcp_stderr[:500]}...')  # Log first 500 chars
                 for line in bcp_stderr.strip().split('\n'):
                     line = line.strip()
                     if line:
                         bcp_output_lines.append(line)
-                        self.logger.debug(f'BCP stderr: {line}')
+                        self.logger.debug(f'BCP stderr line: {line}')
             
-            # Parse final record count from combined output
+            # Parse final record count from stderr
             # Look for the final "X rows copied." message
             if bcp_output_lines:
-                    # Log last few output lines for debugging
-                    self.logger.debug(f'BCP output last 5 lines: {bcp_output_lines[-5:]}')
-                    
-                    # Search for the final "X rows copied." message (usually at the end)
-                    # The message format is: "                                                          100000 rows copied."
-                    # with leading whitespace and optional period
-                    for line in reversed(bcp_output_lines):
-                        # Match pattern like "100000 rows copied." (with optional leading/trailing whitespace and period)
-                        # More flexible pattern to handle various formats
-                        match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
-                        if match:
-                            record_count = int(match.group(1))
-                            self.logger.info(f'Parsed final record count from BCP output: {record_count:,} rows')
-                            break
-                    
-                    # If not found, try alternative pattern and log for debugging
-                    if record_count == 0:
-                        self.logger.warning(f'Could not parse record count from BCP output. Last 10 lines: {bcp_output_lines[-10:]}')
-                        # Try alternative pattern - look for any line with "rows copied"
-                        for line in reversed(bcp_output_lines):
-                            # Try matching just numbers followed by "rows" and "copied" anywhere in line
-                            match = re.search(r'(\d+)\s+rows?', line, re.IGNORECASE)
-                            if match and 'copied' in line.lower():
-                                record_count = int(match.group(1))
-                                self.logger.info(f'Parsed record count using alternative pattern: {record_count:,} rows')
-                                break
-                    
-                    # If not found, log all output lines for debugging
-                    if record_count == 0:
-                        self.logger.warning(f'Could not parse record count from BCP output. Last 10 lines: {bcp_output_lines[-10:]}')
+                # Log last few output lines for debugging
+                self.logger.info(f'BCP stderr last 5 lines: {bcp_output_lines[-5:]}')
+                
+                # Search for the final "X rows copied." message (usually at the end)
+                # The message format is: "                                                          100000 rows copied."
+                # with leading whitespace and optional period
+                for line in reversed(bcp_output_lines):
+                    # Match pattern like "100000 rows copied." (with optional leading/trailing whitespace and period)
+                    match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
+                    if match:
+                        record_count = int(match.group(1))
+                        self.logger.info(f'Parsed final record count from BCP output: {record_count:,} rows')
+                        break
+                
+                # If not found, log for debugging
+                if record_count == 0:
+                    self.logger.warning(f'Could not parse record count from BCP output. Last 10 lines: {bcp_output_lines[-10:]}')
+            else:
+                self.logger.warning(f'BCP stderr is empty, cannot parse record count')
             
             # Check for errors
             if bcp_returncode != 0:
