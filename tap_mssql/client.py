@@ -886,11 +886,15 @@ class mssqlStream(SQLStream):
                 bcp_returncode = bcp_process.wait()
                 self.logger.info(f'BCP process completed with return code: {bcp_returncode}')
                 
-                # Read BCP stderr
-                self.logger.info(f'Reading BCP stderr...')
+                # Read BCP stdout (summary message is in stdout, not stderr)
+                self.logger.info(f'Reading BCP stdout...')
+                bcp_stdout = bcp_process.stdout.read().decode('utf-8', errors='replace')
+                self.logger.info(f'BCP stdout read ({len(bcp_stdout)} bytes)')
+                
+                # Read BCP stderr (for error messages)
                 bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
-                self.logger.info(f'BCP stderr read ({len(bcp_stderr)} bytes)')
-                bcp_process.stdout.close()
+                if bcp_stderr:
+                    self.logger.debug(f'BCP stderr ({len(bcp_stderr)} bytes): {bcp_stderr[:200]}')
                 
                 # Wait for gzip thread to complete
                 self.logger.info(f'Waiting for gzip thread to complete...')
@@ -913,24 +917,24 @@ class mssqlStream(SQLStream):
                 except Exception as e:
                     self.logger.warning(f'Failed to remove named pipe {fifo_path}: {e}')
             
-            # Parse BCP stderr to extract record count
-            # Summary message appears in stderr: "100000 rows copied."
+            # Parse BCP stdout to extract record count
+            # Summary message appears in stdout: "100000 rows copied."
             record_count = 0  # Initialize record count
             bcp_output_lines = []
             
-            if bcp_stderr:
-                self.logger.info(f'BCP stderr content ({len(bcp_stderr)} bytes):\n{bcp_stderr[:500]}...')  # Log first 500 chars
-                for line in bcp_stderr.strip().split('\n'):
+            if bcp_stdout:
+                self.logger.info(f'BCP stdout content ({len(bcp_stdout)} bytes):\n{bcp_stdout[:500]}...')  # Log first 500 chars
+                for line in bcp_stdout.strip().split('\n'):
                     line = line.strip()
                     if line:
                         bcp_output_lines.append(line)
-                        self.logger.debug(f'BCP stderr line: {line}')
+                        self.logger.debug(f'BCP stdout line: {line}')
             
-            # Parse final record count from stderr
+            # Parse final record count from stdout
             # Look for the final "X rows copied." message
             if bcp_output_lines:
                 # Log last few output lines for debugging
-                self.logger.info(f'BCP stderr last 5 lines: {bcp_output_lines[-5:]}')
+                self.logger.info(f'BCP stdout last 5 lines: {bcp_output_lines[-5:]}')
                 
                 # Search for the final "X rows copied." message (usually at the end)
                 # The message format is: "                                                          100000 rows copied."
@@ -940,14 +944,14 @@ class mssqlStream(SQLStream):
                     match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
                     if match:
                         record_count = int(match.group(1))
-                        self.logger.info(f'Parsed final record count from BCP output: {record_count:,} rows')
+                        self.logger.info(f'Parsed final record count from BCP stdout: {record_count:,} rows')
                         break
                 
                 # If not found, log for debugging
                 if record_count == 0:
-                    self.logger.warning(f'Could not parse record count from BCP output. Last 10 lines: {bcp_output_lines[-10:]}')
+                    self.logger.warning(f'Could not parse record count from BCP stdout. Last 10 lines: {bcp_output_lines[-10:]}')
             else:
-                self.logger.warning(f'BCP stderr is empty, cannot parse record count')
+                self.logger.warning(f'BCP stdout is empty, cannot parse record count')
             
             # Check for errors
             if bcp_returncode != 0:
