@@ -32,6 +32,9 @@ job_root = os.environ.get("JOB_ROOT")
 job_id = os.environ.get("JOB_ID", "")
 LOCAL_OUTPUT_DIR = f"/home/hotglue/{job_id}/sync-output" if job_root else f"../.secrets"
 
+# Get BCP path from environment
+BCP_PATH = "/opt/mssql-tools/bin/bcp" if job_root else "bcp"
+
 class mssqlConnector(SQLConnector):
     """Connects to the mssql SQL source."""
 
@@ -620,7 +623,7 @@ class mssqlStream(SQLStream):
         # BCP expects the query as a quoted string argument
         # The query should be wrapped in quotes for the command
         cmd = [
-            'bcp',
+            BCP_PATH,
             sql_query,  # The query string will be passed as-is, subprocess handles quoting
             'queryout',
             output_file,  # Direct path to CSV file
