@@ -592,6 +592,7 @@ class mssqlStream(SQLStream):
     def _build_bcp_command(
         self,
         sql_query: str,
+        output_file: str,
     ) -> list[str]:
         """Build BCP command arguments.
 
@@ -618,12 +619,11 @@ class mssqlStream(SQLStream):
 
         # BCP expects the query as a quoted string argument
         # The query should be wrapped in quotes for the command
-        # Always use /dev/stdout - will be replaced with FIFO path when needed
         cmd = [
             'bcp',
             sql_query,  # The query string will be passed as-is, subprocess handles quoting
             'queryout',
-            '/dev/stdout',
+            output_file,  # Direct path to CSV file
             '-S', server,
             '-d', database,
             '-U', user,
@@ -669,9 +669,9 @@ class mssqlStream(SQLStream):
         # Create output directory if it doesn't exist
         os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
         
-        # Create output file name: {stream}.csv.gz
+        # Create output file name: {stream}.csv
         stream_name = self.name
-        compressed_file = os.path.join(LOCAL_OUTPUT_DIR, f"{stream_name}.csv.gz")
+        csv_file = os.path.join(LOCAL_OUTPUT_DIR, f"{stream_name}.csv")
 
         # Initialize variables for BCP output parsing
         bcp_stdout = ""
@@ -679,8 +679,8 @@ class mssqlStream(SQLStream):
         bcp_returncode = 0
         
         try:
-            # Build BCP command to output to stdout
-            bcp_cmd = self._build_bcp_command(sql_query)
+            # Build BCP command with CSV file path
+            bcp_cmd = self._build_bcp_command(sql_query, csv_file)
             
             # Log BCP command (hide password for security)
             bcp_cmd_safe = bcp_cmd.copy()
@@ -688,63 +688,32 @@ class mssqlStream(SQLStream):
                 pwd_idx = bcp_cmd_safe.index('-P')
                 if pwd_idx + 1 < len(bcp_cmd_safe):
                     bcp_cmd_safe[pwd_idx + 1] = '***'
-            self.logger.info(f'Executing BCP piped to gzip: {" ".join(bcp_cmd_safe)} | gzip > {compressed_file}')
+            self.logger.info(f'Executing BCP: {" ".join(bcp_cmd_safe)}')
             self.logger.info(f'BCP SQL query: {sql_query}')
             
-            # Time BCP and compression
+            # Time BCP export
             bcp_start_time = time.time()
-            self.logger.info(f'Starting BCP export to {compressed_file}')
+            self.logger.info(f'Starting BCP export to {csv_file}')
             
-            # Simple approach: bcp ... queryout /dev/stdout ... | gzip > file.csv.gz
-            # BCP command already has /dev/stdout in queryout parameter
-            bcp_cmd_stdout = bcp_cmd.copy()  # Already has /dev/stdout
+            # BCP writes directly to CSV file via queryout parameter
+            bcp_process = subprocess.Popen(
+                bcp_cmd,
+                stdout=subprocess.DEVNULL,  # BCP writes to queryout file, not stdout
+                stderr=subprocess.PIPE,
+                text=False,
+            )
+            self.logger.info(f'BCP process started (PID: {bcp_process.pid})')
             
-            # Open output file for gzip
-            with open(compressed_file, 'wb') as gz_file:
-                self.logger.info(f'Starting BCP piped to gzip...')
-                
-                # Start BCP process - writes to stdout
-                bcp_process = subprocess.Popen(
-                    bcp_cmd_stdout,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=False,
-                )
-                self.logger.info(f'BCP process started (PID: {bcp_process.pid})')
-                
-                # Start gzip process, piping BCP stdout to gzip stdin
-                gzip_process = subprocess.Popen(
-                    ['gzip', '-c'],
-                    stdin=bcp_process.stdout,
-                    stdout=gz_file,
-                    stderr=subprocess.PIPE,
-                )
-                self.logger.info(f'Gzip process started (PID: {gzip_process.pid})')
-                
-                # Close BCP's stdout so gzip can detect EOF
-                bcp_process.stdout.close()
-                
-                # Wait for both processes to complete
-                self.logger.info(f'Waiting for BCP and gzip to complete...')
-                bcp_returncode = bcp_process.wait()
-                self.logger.info(f'BCP process completed with return code: {bcp_returncode}')
-                
-                gzip_returncode = gzip_process.wait()
-                self.logger.info(f'Gzip process completed with return code: {gzip_returncode}')
-                
-                # Read BCP stderr (summary message and progress are in stderr)
-                bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
-                self.logger.info(f'BCP stderr read ({len(bcp_stderr)} bytes)')
-                
-                # Check for errors
-                if gzip_returncode != 0:
-                    gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
-                    raise RuntimeError(f'Gzip failed with return code {gzip_returncode}: {gzip_stderr}')
-                
-                # Final sync to ensure all data is written
-                os.fsync(gz_file.fileno())
+            # Wait for BCP to complete
+            self.logger.info(f'Waiting for BCP to complete...')
+            bcp_returncode = bcp_process.wait()
+            self.logger.info(f'BCP process completed with return code: {bcp_returncode}')
             
-            # BCP stdout went to gzip, so it's empty
+            # Read BCP stderr (summary message and progress are in stderr)
+            bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
+            self.logger.info(f'BCP stderr read ({len(bcp_stderr)} bytes)')
+            
+            # BCP stdout is empty (went to CSV file via queryout)
             bcp_stdout = ""
             
             # Parse BCP stdout to extract record count
@@ -798,13 +767,13 @@ class mssqlStream(SQLStream):
             bcp_end_time = time.time()
             bcp_duration = bcp_end_time - bcp_start_time
             
-            # Get compressed file size
-            compressed_size = os.path.getsize(compressed_file)
-            compressed_size_mb = compressed_size / (1024 * 1024)
+            # Get CSV file size
+            csv_size = os.path.getsize(csv_file)
+            csv_size_mb = csv_size / (1024 * 1024)
             
             self.logger.info(
-                f'BCP export and compression completed in {bcp_duration:.2f} seconds. '
-                f'Compressed file: {compressed_file} ({compressed_size_mb:.2f} MB)'
+                f'BCP export completed in {bcp_duration:.2f} seconds. '
+                f'CSV file: {csv_file} ({csv_size_mb:.2f} MB)'
             )
             
             # Emit metric using SDK's logger format for consistency
@@ -820,12 +789,12 @@ class mssqlStream(SQLStream):
             
             self.logger.info(f'Emitted metric for {record_count:,} records')
             
-            # Don't yield any records - all data is in the CSV.gz file
+            # Don't yield any records - all data is in the CSV file
             # Return empty generator (function must be a generator, even if it yields nothing)
             if False:
                 yield  # This makes the function a generator
             
         finally:
-            # Keep the CSV.gz file - don't delete it
-            # The file is at compressed_file location and contains all the data
+            # Keep the CSV file - don't delete it
+            # The file is at csv_file location and contains all the data
             pass
