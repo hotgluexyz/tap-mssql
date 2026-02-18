@@ -717,34 +717,18 @@ class mssqlStream(SQLStream):
                         self.logger.info(f'Gzip thread: Opening FIFO for reading...')
                         with open(fifo_path, 'rb') as fifo_read:
                             self.logger.info(f'Gzip thread: FIFO opened, opening output file...')
-                            # Open file with line buffering (buffering=1) to ensure periodic flushing
-                            with open(compressed_file, 'wb', buffering=8192) as gz_file:
+                            # Open file with small buffer for more frequent writes to disk
+                            with open(compressed_file, 'wb', buffering=65536) as gz_file:  # 64KB buffer
                                 self.logger.info(f'Gzip thread: Starting gzip process...')
                                 gzip_process = subprocess.Popen(
                                     ['gzip', '-c'],
                                     stdin=fifo_read,
                                     stdout=gz_file,
                                     stderr=subprocess.PIPE,
-                                    bufsize=8192,  # Set buffer size for gzip process
                                 )
                                 self.logger.info(f'Gzip thread: Gzip process started (PID: {gzip_process.pid})')
-                                
-                                # Monitor and flush periodically
-                                import time
-                                last_flush = time.time()
-                                flush_interval = 5.0  # Flush every 5 seconds
-                                
-                                # Wait for process with periodic flushing
-                                while gzip_process.poll() is None:
-                                    time.sleep(0.1)  # Check every 100ms
-                                    if time.time() - last_flush >= flush_interval:
-                                        gz_file.flush()
-                                        os.fsync(gz_file.fileno())  # Force write to disk
-                                        last_flush = time.time()
-                                
                                 gzip_returncode = gzip_process.wait()
-                                # Final flush
-                                gz_file.flush()
+                                # Final sync to ensure all data is written
                                 os.fsync(gz_file.fileno())
                                 self.logger.info(f'Gzip thread: Gzip completed with return code {gzip_returncode}')
                                 if gzip_returncode != 0:
