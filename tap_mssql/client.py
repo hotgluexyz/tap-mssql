@@ -19,6 +19,7 @@ import re
 import pendulum
 import pyodbc
 import sqlalchemy
+import pathlib
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import URL
@@ -779,17 +780,8 @@ class mssqlStream(SQLStream):
                 f'CSV file: {csv_file} ({csv_size_mb:.2f} MB)'
             )
             
-            # Emit metric using SDK's logger format for consistency
-            # Use singer.metrics.record_counter() to get the correct count, but format it like SDK
-            metric_logger = logging.getLogger("singer_sdk.metrics")
-            metric_dict = {
-                "type": "counter",
-                "metric": "record_count",
-                "value": record_count,
-                "tags": {"stream": self.name}
-            }
-            metric_logger.info(f"METRIC: {json.dumps(metric_dict)}")
-            
+            self.update_job_metrics(self.name, record_count, LOCAL_OUTPUT_DIR)
+                        
             self.logger.info(f'Emitted metric for {record_count:,} records')
             
             # Don't yield any records - all data is in the CSV file
@@ -801,3 +793,49 @@ class mssqlStream(SQLStream):
             # Keep the CSV file - don't delete it
             # The file is at csv_file location and contains all the data
             pass
+        
+    def update_job_metrics(self, stream_name: str, record_count: int, output_dir: str):
+        """
+        Update metrics for a running job by tracking record counts per stream.
+
+        This function maintains a JSON file that keeps track of the number of records
+        processed for each stream during a job execution. The metrics are stored in
+        a 'job_metrics.json' file in the specified folder path.
+
+        Args:
+            stream_name (str): The name of the stream being processed
+            record_count (int): Number of records processed in the current batch
+            output_dir (str): Folder path to store the job metrics
+
+        Examples:
+            >>> update_job_metrics("customers", 1000, "job_123")
+            # Updates job_metrics.json with:
+            # {
+            #   "recordCount": {
+            #     "customers": 1000
+            #   }
+            # }
+        """
+        job_metrics_path = os.path.expanduser(os.path.join(output_dir, "job_metrics.json"))
+
+        if not os.path.isfile(job_metrics_path):
+            pathlib.Path(job_metrics_path).touch()
+
+        with open(job_metrics_path, "r+") as f:
+            content = dict()
+
+            try:
+                content = json.loads(f.read())
+            except:
+                pass
+
+            if not content.get("recordCount"):
+                content["recordCount"] = dict()
+
+            content["recordCount"][stream_name] = (
+                content["recordCount"].get(stream_name, 0) + record_count
+            )
+
+            f.seek(0)
+            self.logger.info(f"Updating job metrics for {stream_name} with {record_count} records")
+            f.write(json.dumps(content))
