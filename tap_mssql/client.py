@@ -26,7 +26,7 @@ from sqlalchemy.engine.url import URL
 
 from singer_sdk import SQLConnector, SQLStream
 from singer_sdk.batch import BaseBatcher, lazy_chunked_generator
-from singer_sdk.metrics import get_metric_logger
+import logging
 
 # Get output directory from environment variables
 job_root = os.environ.get("JOB_ROOT")
@@ -507,7 +507,7 @@ class mssqlStream(SQLStream):
         }
         
         # Write the metric using singer_sdk.metrics logger (same format as SDK)
-        metric_logger = get_metric_logger()
+        metric_logger = logging.getLogger("singer_sdk.metrics")
         metric_logger.info(f"METRIC: {json.dumps(metric_dict)}")
 
     def _build_sql_query_string(
