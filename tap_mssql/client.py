@@ -8,12 +8,9 @@ import gzip
 import json
 import datetime
 import subprocess
-import tempfile
 import os
-import csv
 import time
 
-from base64 import b64encode
 from decimal import Decimal
 from uuid import uuid4
 from typing import Any, Iterable, Iterator
@@ -29,7 +26,6 @@ from sqlalchemy.engine.url import URL
 
 from singer_sdk import SQLConnector, SQLStream
 from singer_sdk.batch import BaseBatcher, lazy_chunked_generator
-from singer_sdk.metrics import Counter
 
 # Get output directory from environment variables
 job_root = os.environ.get("JOB_ROOT")
@@ -501,29 +497,17 @@ class mssqlStream(SQLStream):
         Args:
             record_count: The number of records to report in the metric.
         """
-        metric = Counter(
-            metric="record_count",
-            value=record_count,
-            tags={"stream": self.name},
-        )
-        # Write the metric message directly using the tap's write method
-        try:
-            if hasattr(self, 'tap') and self.tap and hasattr(self.tap, '_write_message'):
-                self.tap._write_message(metric)
-            elif hasattr(self, '_write_message'):
-                self._write_message(metric)
-            else:
-                # Fallback: construct and print the metric message manually
-                metric_dict = {
-                    "type": "METRIC",
-                    "metric": "record_count",
-                    "value": record_count,
-                    "tags": {"stream": self.name}
-                }
-                print(json.dumps(metric_dict), flush=True)
-        except Exception as e:
-            # If metric emission fails, log it
-            self.logger.warning(f'Failed to emit metric: {e}')
+        # Construct the metric message in Singer format
+        metric_dict = {
+            "type": "counter",
+            "metric": "record_count",
+            "value": record_count,
+            "tags": {"stream": self.name}
+        }
+        
+        # Write the metric message using the tap's write method
+        # Streams have access to self.tap which is set during initialization
+        self.tap._write_message(metric_dict)
 
     def _build_sql_query_string(
         self,
@@ -668,101 +652,6 @@ class mssqlStream(SQLStream):
 
         return cmd
 
-    def _parse_bcp_csv(
-        self,
-        csv_file: str,
-        column_names: list[str],
-    ) -> Iterator[dict[str, Any]]:
-        """Parse BCP CSV output file.
-
-        Args:
-            csv_file: Path to CSV file.
-            column_names: List of column names in order.
-
-        Yields:
-            Dictionary records.
-        """
-        delimiter = '\x1F'
-
-        try:
-            # Check if file exists and has content
-            if not os.path.exists(csv_file):
-                self.logger.warning(f'BCP output file does not exist: {csv_file}')
-                return
-            
-            if os.path.getsize(csv_file) == 0:
-                self.logger.info(f'BCP output file is empty: {csv_file}')
-                return
-
-            with open(csv_file, 'r', encoding='utf-8', errors='replace') as f:
-                # Use csv.reader with custom delimiter
-                reader = csv.reader(f, delimiter=delimiter)
-                
-                for row_num, row in enumerate(reader, start=1):
-                    # Skip empty rows
-                    if not row or all(not cell.strip() for cell in row):
-                        continue
-                    
-                    # Create dict from row values and column names
-                    if len(row) != len(column_names):
-                        # Skip rows that don't match expected column count
-                        self.logger.warning(
-                            f'Row {row_num} has {len(row)} columns, expected {len(column_names)}. Skipping.'
-                        )
-                        continue
-                    
-                    # Convert empty strings to None for consistency with SQLAlchemy behavior
-                    record = {
-                        col: (val if val != '' else None)
-                        for col, val in zip(column_names, row)
-                    }
-                    yield record
-        except Exception as e:
-            self.logger.error(f'Error parsing BCP CSV file: {e}')
-            raise
-
-    def post_process(
-        self,
-        row: dict,
-        context: dict | None = None,  # noqa: ARG002
-    ) -> dict | None:
-        """As needed, append or transform raw data to match expected structure.
-
-        Optional. This method gives developers an opportunity to "clean up" the results
-        prior to returning records to the downstream tap - for instance: cleaning,
-        renaming, or appending properties to the raw record result returned from the
-        API.
-
-        Developers may also return `None` from this method to filter out
-        invalid or not-applicable records from the stream.
-
-        Args:
-            row: Individual record in the stream.
-            context: Stream partition or context dictionary.
-
-        Returns:
-            The resulting record dict, or `None` if the record should be excluded.
-        """
-        # We change the name to record so when the change breaking
-        # change from row to record is done in SDK 1.0 the edits
-        # to accomidate the swithc will be two
-        record: dict = row
-
-        # Get the Stream Properties Dictornary from the Schema
-        properties: dict = self.schema.get('properties')
-
-        for key, value in record.items():
-            if value is not None:
-                # Get the Item/Column property
-                property_schema: dict = properties.get(key)
-                # Date in ISO format
-                if isinstance(value, datetime.date):
-                    record.update({key: value.isoformat()})
-                # Encode base64 binary fields in the record
-                if property_schema.get('contentEncoding') == 'base64':
-                    record.update({key: b64encode(value).decode()})
-
-        return record
 
     def get_records(self, context: dict | None) -> Iterable[dict[str, Any]]:
         """Return a generator of record-type dictionary objects.
@@ -801,6 +690,11 @@ class mssqlStream(SQLStream):
         stream_name = self.name
         compressed_file = os.path.join(LOCAL_OUTPUT_DIR, f"{stream_name}.csv.gz")
 
+        # Initialize variables for BCP output parsing
+        bcp_stdout = ""
+        bcp_stderr = ""
+        bcp_returncode = 0
+        
         try:
             # Build BCP command to output to stdout
             bcp_cmd = self._build_bcp_command(sql_query)
