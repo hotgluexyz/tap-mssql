@@ -506,8 +506,8 @@ class mssqlStream(SQLStream):
         }
         
         # Write the metric message using the tap's write method
-        # Streams have access to self.tap which is set during initialization
-        self.tap._write_message(metric_dict)
+        # Streams have access to self._tap which is set during initialization
+        self._tap._write_message(metric_dict)
 
     def _build_sql_query_string(
         self,
