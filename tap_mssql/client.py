@@ -630,6 +630,7 @@ class mssqlStream(SQLStream):
             '-P', password,
             '-c',
             '-t', delimiter,
+            '-b', '1000000000',  # Large batch size to avoid summary messages
         ]
 
         return cmd
