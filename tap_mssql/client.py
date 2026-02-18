@@ -26,6 +26,7 @@ from sqlalchemy.engine.url import URL
 
 from singer_sdk import SQLConnector, SQLStream
 from singer_sdk.batch import BaseBatcher, lazy_chunked_generator
+import singer
 
 # Get output directory from environment variables
 job_root = os.environ.get("JOB_ROOT")
@@ -505,9 +506,8 @@ class mssqlStream(SQLStream):
             "tags": {"stream": self.name}
         }
         
-        # Write the metric message using the tap's write method
-        # Streams have access to self._tap which is set during initialization
-        self._tap._write_message(metric_dict)
+        # Write the metric message using singer.write_message
+        singer.write_message(metric_dict)
 
     def _build_sql_query_string(
         self,
