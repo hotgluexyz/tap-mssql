@@ -20,8 +20,6 @@ import threading
 import pendulum
 import pyodbc
 import sqlalchemy
-import singer
-import singer.metrics as metrics
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import URL
@@ -856,12 +854,16 @@ class mssqlStream(SQLStream):
                 f'Compressed file: {compressed_file} ({compressed_size_mb:.2f} MB)'
             )
             
-            # Use singer.metrics.record_counter() to emit metrics (same pattern as tap-snowflake)
-            # This will emit the metric with the correct count
-            with metrics.record_counter(None) as counter:
-                counter.tags['stream'] = self.name
-                # Increment the counter by the actual record count from BCP
-                counter.increment(record_count)
+            # Emit metric using SDK's logger format for consistency
+            # Use singer.metrics.record_counter() to get the correct count, but format it like SDK
+            metric_logger = logging.getLogger("singer_sdk.metrics")
+            metric_dict = {
+                "type": "counter",
+                "metric": "record_count",
+                "value": record_count,
+                "tags": {"stream": self.name}
+            }
+            metric_logger.info(f"METRIC: {json.dumps(metric_dict)}")
             
             self.logger.info(f'Emitted metric for {record_count:,} records')
             
