@@ -15,7 +15,6 @@ from decimal import Decimal
 from uuid import uuid4
 from typing import Any, Iterable, Iterator
 import re
-import threading
 
 import pendulum
 import pyodbc
@@ -695,107 +694,57 @@ class mssqlStream(SQLStream):
             bcp_start_time = time.time()
             self.logger.info(f'Starting BCP export to {compressed_file}')
             
-            # Step 1: mkfifo data_export.csv
-            fifo_path = compressed_file.replace('.csv.gz', '.csv')
-            self.logger.info(f'Step 1: Creating named pipe: {fifo_path}')
-            try:
-                # Remove FIFO if it already exists (from previous run)
-                if os.path.exists(fifo_path):
-                    self.logger.info(f'Removing existing FIFO: {fifo_path}')
-                    os.remove(fifo_path)
-                os.mkfifo(fifo_path)
-                self.logger.info(f'Named pipe created: {fifo_path}')
+            # Simple approach: bcp ... queryout /dev/stdout ... | gzip > file.csv.gz
+            # BCP command already has /dev/stdout in queryout parameter
+            bcp_cmd_stdout = bcp_cmd.copy()  # Already has /dev/stdout
+            
+            # Open output file for gzip
+            with open(compressed_file, 'wb') as gz_file:
+                self.logger.info(f'Starting BCP piped to gzip...')
                 
-                # Step 2: gzip < data_export.csv > data_export.csv.gz & (run in background thread)
-                self.logger.info(f'Step 2: Starting gzip in background thread')
-                gzip_completed = threading.Event()
-                gzip_error = [None]
-                
-                def run_gzip():
-                    """Run gzip in background: gzip < fifo > output.gz"""
-                    try:
-                        self.logger.info(f'Gzip thread: Opening FIFO for reading...')
-                        with open(fifo_path, 'rb') as fifo_read:
-                            self.logger.info(f'Gzip thread: FIFO opened, opening output file...')
-                            # Open file with small buffer for more frequent writes to disk
-                            with open(compressed_file, 'wb', buffering=65536) as gz_file:  # 64KB buffer
-                                self.logger.info(f'Gzip thread: Starting gzip process...')
-                                gzip_process = subprocess.Popen(
-                                    ['gzip', '-c'],
-                                    stdin=fifo_read,
-                                    stdout=gz_file,
-                                    stderr=subprocess.PIPE,
-                                )
-                                self.logger.info(f'Gzip thread: Gzip process started (PID: {gzip_process.pid})')
-                                gzip_returncode = gzip_process.wait()
-                                # Final sync to ensure all data is written
-                                os.fsync(gz_file.fileno())
-                                self.logger.info(f'Gzip thread: Gzip completed with return code {gzip_returncode}')
-                                if gzip_returncode != 0:
-                                    gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
-                                    gzip_error[0] = f'gzip failed: {gzip_stderr}'
-                    except Exception as e:
-                        gzip_error[0] = f'gzip thread error: {e}'
-                        self.logger.error(f'Gzip thread error: {e}')
-                    finally:
-                        gzip_completed.set()
-                        self.logger.info(f'Gzip thread: Completed')
-                
-                gzip_thread = threading.Thread(target=run_gzip, daemon=False)
-                gzip_thread.start()
-                self.logger.info(f'Gzip thread started')
-                
-                # Step 3: bcp ... queryout data_export.csv ...
-                self.logger.info(f'Step 3: Starting BCP process')
-                bcp_cmd_fifo = bcp_cmd.copy()
-                # Replace '/dev/stdout' with the fifo path
-                stdout_idx = bcp_cmd_fifo.index('/dev/stdout')
-                bcp_cmd_fifo[stdout_idx] = fifo_path
-                self.logger.info(f'BCP will write to FIFO: {fifo_path}')
-                
+                # Start BCP process - writes to stdout
                 bcp_process = subprocess.Popen(
-                    bcp_cmd_fifo,
+                    bcp_cmd_stdout,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=False,
                 )
                 self.logger.info(f'BCP process started (PID: {bcp_process.pid})')
                 
-                # Wait for BCP to complete
-                self.logger.info(f'Waiting for BCP process to complete...')
+                # Start gzip process, piping BCP stdout to gzip stdin
+                gzip_process = subprocess.Popen(
+                    ['gzip', '-c'],
+                    stdin=bcp_process.stdout,
+                    stdout=gz_file,
+                    stderr=subprocess.PIPE,
+                )
+                self.logger.info(f'Gzip process started (PID: {gzip_process.pid})')
+                
+                # Close BCP's stdout so gzip can detect EOF
+                bcp_process.stdout.close()
+                
+                # Wait for both processes to complete
+                self.logger.info(f'Waiting for BCP and gzip to complete...')
                 bcp_returncode = bcp_process.wait()
                 self.logger.info(f'BCP process completed with return code: {bcp_returncode}')
                 
-                # Read BCP stdout (summary message is in stdout, not stderr)
-                self.logger.info(f'Reading BCP stdout...')
-                bcp_stdout = bcp_process.stdout.read().decode('utf-8', errors='replace')
-                self.logger.info(f'BCP stdout read ({len(bcp_stdout)} bytes)')
+                gzip_returncode = gzip_process.wait()
+                self.logger.info(f'Gzip process completed with return code: {gzip_returncode}')
                 
-                # Read BCP stderr (for error messages)
+                # Read BCP stderr (summary message and progress are in stderr)
                 bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
-                if bcp_stderr:
-                    self.logger.debug(f'BCP stderr ({len(bcp_stderr)} bytes): {bcp_stderr[:200]}')
+                self.logger.info(f'BCP stderr read ({len(bcp_stderr)} bytes)')
                 
-                # Wait for gzip thread to complete
-                self.logger.info(f'Waiting for gzip thread to complete...')
-                gzip_thread.join(timeout=300)  # 5 minute timeout
-                if not gzip_completed.is_set():
-                    raise RuntimeError('Gzip thread timed out after 5 minutes')
+                # Check for errors
+                if gzip_returncode != 0:
+                    gzip_stderr = gzip_process.stderr.read().decode('utf-8', errors='replace')
+                    raise RuntimeError(f'Gzip failed with return code {gzip_returncode}: {gzip_stderr}')
                 
-                if gzip_error[0]:
-                    raise RuntimeError(gzip_error[0])
-                
-                self.logger.info(f'Gzip thread completed successfully')
-                
-            finally:
-                # Step 4: rm data_export.csv
-                self.logger.info(f'Step 4: Removing named pipe: {fifo_path}')
-                try:
-                    if os.path.exists(fifo_path):
-                        os.remove(fifo_path)
-                        self.logger.info(f'Named pipe removed: {fifo_path}')
-                except Exception as e:
-                    self.logger.warning(f'Failed to remove named pipe {fifo_path}: {e}')
+                # Final sync to ensure all data is written
+                os.fsync(gz_file.fileno())
+            
+            # BCP stdout went to gzip, so it's empty
+            bcp_stdout = ""
             
             # Parse BCP stdout to extract record count
             # Summary message appears in stdout: "100000 rows copied."
