@@ -20,6 +20,8 @@ import threading
 import pendulum
 import pyodbc
 import sqlalchemy
+import singer
+import singer.metrics as metrics
 
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine.url import URL
@@ -872,10 +874,14 @@ class mssqlStream(SQLStream):
                 f'Compressed file: {compressed_file} ({compressed_size_mb:.2f} MB)'
             )
             
-            # Emit final record count metric
-            if record_count > 0:
-                self._emit_record_count_metric(record_count)
-                self.logger.info(f'Emitted metric for {record_count:,} records')
+            # Use singer.metrics.record_counter() to emit metrics (same pattern as tap-snowflake)
+            # This will emit the metric with the correct count
+            with metrics.record_counter(None) as counter:
+                counter.tags['stream'] = self.name
+                # Increment the counter by the actual record count from BCP
+                counter.increment(record_count)
+            
+            self.logger.info(f'Emitted metric for {record_count:,} records')
             
             # Don't yield any records - all data is in the CSV.gz file
             # Return empty generator (function must be a generator, even if it yields nothing)
