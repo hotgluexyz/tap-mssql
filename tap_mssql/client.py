@@ -724,15 +724,16 @@ class mssqlStream(SQLStream):
             )
             self.logger.info(f'BCP process started (PID: {bcp_process.pid})')
             
-            # Wait for BCP to complete
+            # Wait for BCP and read stdout/stderr (communicate() avoids deadlock if pipes fill)
             self.logger.info(f'Waiting for BCP to complete...')
-            bcp_returncode = bcp_process.wait()
+            bcp_stdout_bytes, bcp_stderr_bytes = bcp_process.communicate()
+            bcp_returncode = bcp_process.returncode
             self.logger.info(f'BCP process completed with return code: {bcp_returncode}')
             
-            # Read BCP stdout and stderr (summary "X rows copied" may be in either stream)
-            bcp_stdout = bcp_process.stdout.read().decode('utf-8', errors='replace')
-            bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
-            self.logger.info(f'BCP stdout read ({len(bcp_stdout)} bytes), stderr read ({len(bcp_stderr)} bytes)')
+            # Decode BCP output (summary "X rows copied" may be in either stream)
+            bcp_stdout = bcp_stdout_bytes.decode('utf-8', errors='replace')
+            bcp_stderr = bcp_stderr_bytes.decode('utf-8', errors='replace')
+            self.logger.info(f'BCP stdout ({len(bcp_stdout)} chars), stderr ({len(bcp_stderr)} chars)')
             
             # Parse record count from "X rows copied." (in stdout per BCP; fallback to stderr)
             record_count = 0
