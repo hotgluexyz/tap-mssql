@@ -61,32 +61,25 @@ class mssqlConnector(SQLConnector):
         Returns:
             The URL as a string.
         """
-        url_drivername = f"{config.get('dialect', 'mssql')}+{config.get('driver_type', 'pyodbc')}"
+        url_drivername = f"{config.get('dialect')}+{config.get('driver_type')}"
         
         config_url = URL.create(
             url_drivername,
-            username=config.get('user'),
-            password=config.get('password'),
+            config.get('user'),
+            config.get('password'),
             host=config.get('host'),
-            database=config.get('database'),
+            database=config.get('database')
         )
 
         if 'port' in config:
             config_url = config_url.set(port=config.get('port'))
 
-        # Add the driver specification and SSL settings to the URL query parameters
-        driver_query = {
-            "driver": "ODBC Driver 18 for SQL Server",
-            "TrustServerCertificate": "yes",  # Add this to trust the server certificate
-            "Encrypt": "yes"                  # Ensure encryption is enabled
-        }
-        
         if 'sqlalchemy_url_query' in config:
-            driver_query.update(config.get('sqlalchemy_url_query'))
-        
-        config_url = config_url.update_query_dict(driver_query)
+            config_url = config_url.update_query_dict(
+                config.get('sqlalchemy_url_query')
+                )
 
-        return str(config_url)
+        return (config_url)
 
     def create_engine(self) -> Engine:
         """Return a new SQLAlchemy engine using the provided config.
