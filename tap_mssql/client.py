@@ -36,6 +36,21 @@ LOCAL_OUTPUT_DIR = f"/home/hotglue/{job_id}/sync-output" if job_root else f"../.
 # Get BCP path from environment
 BCP_PATH = "/opt/mssql-tools/bin/bcp" if job_root else "bcp"
 
+# BCP character delimiter (must match _build_bcp_command -t)
+BCP_DELIMITER = "\x1F"
+
+
+def read_last_line(path: str) -> str | None:
+    with open(path, "rb") as f:
+        try:
+            f.seek(-2, os.SEEK_END)
+            while f.read(1) != b"\n":
+                f.seek(-2, os.SEEK_CUR)
+        except OSError:
+            f.seek(0)
+        return f.readline().decode("utf-8", errors="replace")
+
+
 class mssqlConnector(SQLConnector):
     """Connects to the mssql SQL source."""
 
@@ -592,6 +607,50 @@ class mssqlStream(SQLStream):
 
         return cmd
 
+    def _get_last_replication_key_value_from_csv(
+        self,
+        csv_file: str,
+        selected_column_names: list[str],
+    ) -> Any | None:
+        """Read the last row from the BCP CSV and return the replication_key value.
+
+        BCP output is ordered by replication_key, so the last row has the max value.
+        No header; columns are in selected_column_names order with BCP_DELIMITER.
+        Returns a JSON-compatible value for state bookmarking.
+
+        Uses tail-only reads (seek from end + read backwards in blocks until a newline
+        is found) so it is O(1) in file size and safe for arbitrarily large CSVs.
+        """
+        if not self.replication_key or self.replication_key not in selected_column_names:
+            return None
+        try:
+            last_line = read_last_line(csv_file)
+            if not last_line:
+                return None
+            parts = last_line.split(BCP_DELIMITER)
+            rk_index = selected_column_names.index(self.replication_key)
+            if rk_index >= len(parts):
+                return None
+            raw = parts[rk_index].strip()
+            if raw == "":
+                return None
+            prop = (self.schema.get("properties") or {}).get(self.replication_key) or {}
+            fmt = prop.get("format", "")
+            if fmt == "date-time":
+                return pendulum.parse(raw).isoformat()
+            if fmt == "date":
+                return pendulum.parse(raw).date().isoformat()
+            if prop.get("type") == "integer":
+                return int(raw)
+            if prop.get("type") == "number":
+                return float(raw)
+            return raw
+        except Exception as e:
+            self.logger.warning(
+                f"Could not read last replication key value from CSV: {e}",
+                exc_info=True,
+            )
+            return None
 
     def get_records(self, context: dict | None) -> Iterable[dict[str, Any]]:
         """Return a generator of record-type dictionary objects.
@@ -729,11 +788,19 @@ class mssqlStream(SQLStream):
             self.update_job_metrics(self.name, record_count, LOCAL_OUTPUT_DIR)
                         
             self.logger.info(f'Emitted metric for {record_count:,} records')
-            
-            # Don't yield any records - all data is in the CSV file
-            # Return empty generator (function must be a generator, even if it yields nothing)
-            if False:
-                yield  # This makes the function a generator
+
+            # Use last record from CSV (ordered by replication_key) to advance bookmark
+            if record_count > 0 and self.replication_key:
+                last_rk_value = self._get_last_replication_key_value_from_csv(
+                    csv_file, selected_column_names
+                )
+                if last_rk_value is not None:
+                    dummy_record = {self.replication_key: last_rk_value}
+                    self.logger.info(
+                        f"Yielding dummy record from last CSV row to advance bookmark "
+                        f"{self.replication_key!r} = {last_rk_value!r}"
+                    )
+                    yield dummy_record
             
         finally:
             # Keep the CSV file - don't delete it
