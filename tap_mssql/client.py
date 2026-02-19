@@ -501,12 +501,12 @@ class mssqlStream(SQLStream):
         # Build column list with proper escaping
         column_list = ', '.join([f'[{col}]' for col in selected_columns])
 
-        # Build FROM clause
+        # Build FROM clause (bracket-escape all identifiers for spaces/special chars/reserved words)
         # Handle schema - use 'dbo' as default if schema is None or empty
         if schema and schema != '':
-            from_clause = f'[{database}].{schema}.[{table_name}]'
+            from_clause = f'[{database}].[{schema}].[{table_name}]'
         else:
-            from_clause = f'[{database}].dbo.[{table_name}]'
+            from_clause = f'[{database}].[dbo].[{table_name}]'
 
         # Build SELECT clause (with TOP if needed)
         # Check for max_records config first, then ABORT_AT_RECORD_COUNT
