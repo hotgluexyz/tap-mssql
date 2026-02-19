@@ -65,21 +65,20 @@ class mssqlConnector(SQLConnector):
         
         config_url = URL.create(
             url_drivername,
-            config.get('user'),
-            config.get('password'),
+            username=config.get('user'),
+            password=config.get('password'),
             host=config.get('host'),
-            database=config.get('database')
+            database=config.get('database'),
         )
 
         if 'port' in config:
             config_url = config_url.set(port=config.get('port'))
 
-        if 'sqlalchemy_url_query' in config:
-            config_url = config_url.update_query_dict(
-                config.get('sqlalchemy_url_query')
-                )
+        config_url = config_url.update_query_dict(
+            config.get('sqlalchemy_url_query')
+        )
 
-        return (config_url)
+        return config_url
 
     def create_engine(self) -> Engine:
         """Return a new SQLAlchemy engine using the provided config.

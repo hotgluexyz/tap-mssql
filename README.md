@@ -118,6 +118,7 @@ tap-mssql --about --format=markdown
 | stream_map_config    | False    | None    | User-defined config values to be used within map expressions. |
 | flattening_enabled   | False    | None    | 'True' to enable schema flattening and automatically expand nested properties. |
 | flattening_max_depth | False    | None    | The max depth to flatten schemas. |
+| lookback_window_days | False    | None    | Number of past days to include when pulling data |
 
 A full list of supported settings and capabilities for this
 tap is available by running:
