@@ -604,6 +604,10 @@ class mssqlStream(SQLStream):
             '-t', delimiter,
             '-b', '1000000000',  # Large batch size to avoid summary messages
         ]
+        # ODBC Driver 18 requires -u to trust server cert when TrustServerCertificate=yes in config
+        url_query = config.get('sqlalchemy_url_query') or {}
+        if (url_query.get('TrustServerCertificate') or '').lower() == 'yes':
+            cmd.append('-u')
 
         return cmd
 
