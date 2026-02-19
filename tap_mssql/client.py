@@ -774,10 +774,6 @@ class mssqlStream(SQLStream):
                 self.logger.error(error_msg)
                 raise RuntimeError(error_msg)
             
-            # gzip error checking is done in the thread (gzip_error)
-            # If gzip_error[0] is set, it was already raised above
-                
-            
             bcp_end_time = time.time()
             bcp_duration = bcp_end_time - bcp_start_time
             
