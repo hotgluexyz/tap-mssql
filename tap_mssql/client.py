@@ -655,7 +655,7 @@ class mssqlStream(SQLStream):
             # BCP writes directly to CSV file via queryout parameter
             bcp_process = subprocess.Popen(
                 bcp_cmd,
-                stdout=subprocess.DEVNULL,  # BCP writes to queryout file, not stdout
+                stdout=subprocess.PIPE,  # BCP writes to queryout file, not stdout
                 stderr=subprocess.PIPE,
                 text=False,
             )
