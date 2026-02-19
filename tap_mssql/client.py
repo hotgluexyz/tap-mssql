@@ -856,3 +856,4 @@ class mssqlStream(SQLStream):
             f.seek(0)
             self.logger.info(f"Updating job metrics for {stream_name} with {record_count} records")
             f.write(json.dumps(content))
+            f.truncate()
