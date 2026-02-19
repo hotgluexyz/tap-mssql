@@ -655,7 +655,7 @@ class mssqlStream(SQLStream):
             # BCP writes directly to CSV file via queryout parameter
             bcp_process = subprocess.Popen(
                 bcp_cmd,
-                stdout=subprocess.PIPE,  # BCP writes to queryout file, not stdout
+                stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=False,
             )
@@ -666,54 +666,47 @@ class mssqlStream(SQLStream):
             bcp_returncode = bcp_process.wait()
             self.logger.info(f'BCP process completed with return code: {bcp_returncode}')
             
-            # Read BCP stderr (summary message and progress are in stderr)
+            # Read BCP stdout and stderr (summary "X rows copied" may be in either stream)
+            bcp_stdout = bcp_process.stdout.read().decode('utf-8', errors='replace')
             bcp_stderr = bcp_process.stderr.read().decode('utf-8', errors='replace')
-            self.logger.info(f'BCP stderr read ({len(bcp_stderr)} bytes)')
+            self.logger.info(f'BCP stdout read ({len(bcp_stdout)} bytes), stderr read ({len(bcp_stderr)} bytes)')
             
-            # BCP stdout is empty (went to CSV file via queryout)
-            bcp_stdout = ""
-            
-            # Parse BCP stdout to extract record count
-            # Summary message appears in stdout: "100000 rows copied."
-            record_count = 0  # Initialize record count
-            bcp_output_lines = []
-            
-            if bcp_stdout:
-                self.logger.info(f'BCP stdout content ({len(bcp_stdout)} bytes):\n{bcp_stdout[:500]}...')  # Log first 500 chars
-                for line in bcp_stdout.strip().split('\n'):
+            # Parse record count from "X rows copied." (in stdout per BCP; fallback to stderr)
+            record_count = 0
+
+            def parse_rows_copied(text: str):
+                """Return last 'N rows copied' value found in text, or 0."""
+                count = 0
+                for line in text.strip().split('\n'):
                     line = line.strip()
                     if line:
-                        bcp_output_lines.append(line)
-                        self.logger.debug(f'BCP stdout line: {line}')
-            
-            # Parse final record count from stdout
-            # Look for the final "X rows copied." message
-            if bcp_output_lines:
-                # Log last few output lines for debugging
-                self.logger.info(f'BCP stdout last 5 lines: {bcp_output_lines[-5:]}')
-                
-                # Search for the final "X rows copied." message (usually at the end)
-                # The message format is: "                                                          100000 rows copied."
-                # with leading whitespace and optional period
-                for line in reversed(bcp_output_lines):
-                    # Match pattern like "100000 rows copied." (with optional leading/trailing whitespace and period)
-                    match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
-                    if match:
-                        record_count = int(match.group(1))
-                        self.logger.info(f'Parsed final record count from BCP stdout: {record_count:,} rows')
-                        break
-                
-                # If not found, log for debugging
-                if record_count == 0:
-                    self.logger.warning(f'Could not parse record count from BCP stdout. Last 10 lines: {bcp_output_lines[-10:]}')
-            else:
-                self.logger.warning(f'BCP stdout is empty, cannot parse record count')
+                        match = re.search(r'(\d+)\s+rows?\s+copied', line, re.IGNORECASE)
+                        if match:
+                            count = int(match.group(1))
+                return count
+
+            if bcp_stdout:
+                self.logger.info(f'BCP stdout content ({len(bcp_stdout)} bytes):\n{bcp_stdout[:500]}...')
+            record_count = parse_rows_copied(bcp_stdout)
+            if record_count == 0 and bcp_stderr:
+                record_count = parse_rows_copied(bcp_stderr)
+                if record_count:
+                    self.logger.info(f'Parsed record count from BCP stderr: {record_count:,} rows')
+            if record_count:
+                self.logger.info(f'Parsed record count from BCP output: {record_count:,} rows')
+            if record_count == 0:
+                self.logger.warning(
+                    'Could not parse "X rows copied" from BCP output. '
+                    f'stdout last 500 chars: {bcp_stdout[-500:]!r}; stderr: {bcp_stderr[-500:]!r}'
+                )
             
             # Check for errors
             if bcp_returncode != 0:
                 error_msg = f'BCP command failed with return code {bcp_returncode}'
-                if bcp_output_lines:
-                    error_msg += f': {" ".join(bcp_output_lines[-5:])}'  # Last 5 lines
+                if bcp_stderr:
+                    error_msg += f': {bcp_stderr.strip()[-500:]}'
+                if bcp_stdout and not bcp_stderr:
+                    error_msg += f': {bcp_stdout.strip()[-500:]}'
                 self.logger.error(error_msg)
                 raise RuntimeError(error_msg)
             
