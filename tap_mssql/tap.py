@@ -133,9 +133,20 @@ class Tapmssql(SQLTap):
                     "TrustServerCertificate",
                     th.StringType,
                     description="This is a Yes No option"
-                )
+                ),
+                th.Property(
+                    "Authentication",
+                    th.StringType,
+                    description="ODBC Authentication mode (for example ActiveDirectoryPassword)."
+                ),
+                th.Property(
+                    "Encrypt",
+                    th.StringType,
+                    description="ODBC Encrypt mode (for example yes or mandatory)."
+                ),
+                additional_properties=th.StringType
             ),
-            description="SQLAlchemy URL Query options: driver, TrustServerCertificate"
+            description="SQLAlchemy URL Query options passed through to the ODBC driver."
         ),
         th.Property(
             "batch_config",

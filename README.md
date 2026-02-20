@@ -54,6 +54,8 @@ meltano add extractor tap-mssql --variant buzzcutnorman
 
 ## Configuration
 
+A sample configuration file and full option reference are available in the [`templates/`](templates/) folder: use [`templates/config.json`](templates/config.json) as a starting point and see [`templates/README.md`](templates/README.md) for a description of every config option.
+
 The simplest way to configure tap-mssql is to use the Meltano interactive configuration.
 
 ```bash
@@ -83,6 +85,11 @@ When using `pyodbc` `sqlalchemy_url_query.TrustServerCertificate` let SQLAlchemy
 meltano config tap-mssql set sqlalchemy_url_query.TrustServerCertificate yes
 ```
 
+For Microsoft Fabric or other Entra ID auth flows, use `driver_type=pyodbc` and pass ODBC auth options via `sqlalchemy_url_query`:
+```bash
+meltano config tap-mssql set sqlalchemy_url_query.Authentication ActiveDirectoryPassword
+```
+
 The `pyodbc` driver has added support for a “fast executemany” mode of execution which greatly reduces round trips.  You can trun the option on or off by setting `sqlalchemy_eng_params.fast_executemany` to `"True"` or `"False"`
 ```bash
 meltano config tap-mssql set sqlalchemy_eng_params.fast_executemany "True"
@@ -102,15 +109,15 @@ tap-mssql --about --format=markdown
 
 | Setting              | Required | Default | Description |
 |:---------------------|:--------:|:-------:|:------------|
-| dialect              | True     | mssql   | The Dialect of SQLAlchamey |
+| dialect              | True     | mssql   | The Dialect of SQLAlchemy |
 | driver_type          | True     | pymssql | The Python Driver you will be using to connect to the SQL server |
 | host                 | True     | None    | The FQDN of the Host serving out the SQL Instance |
-| port                 | False    | None    | The port on which SQL awaiting connection |
+| port                 | False    | None    | The port on which SQL is awaiting connection |
 | user                 | True     | None    | The User Account who has been granted access to the SQL Server |
 | password             | True     | None    | The Password for the User account |
 | database             | True     | None    | The Default database for this connection |
-| sqlalchemy_eng_params| False    | None    | SQLAlchemy Engine Paramaters: fast_executemany, future |
-| sqlalchemy_url_query | False    | None    | SQLAlchemy URL Query options: driver, TrustServerCertificate |
+| sqlalchemy_eng_params| False    | None    | SQLAlchemy Engine Parameters: fast_executemany, future |
+| sqlalchemy_url_query | False    | None    | SQLAlchemy URL Query options passed through to ODBC (e.g. driver, Authentication, Encrypt). |
 | batch_config         | False    | None    | Optional Batch Message configuration |
 | start_date           | False    | None    | The earliest record date to sync |
 | hd_jsonschema_types  | False    | False | Turn on Higher Defined(HD) JSON Schema types to assist Targets |
