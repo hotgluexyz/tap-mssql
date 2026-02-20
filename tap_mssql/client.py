@@ -561,7 +561,9 @@ class mssqlStream(SQLStream):
                     if isinstance(start_val, datetime.datetime):
                         # ISO format with timezone for datetimeoffset comparison
                         iso_str = start_val.isoformat()
-                        if "+" not in iso_str and "Z" not in iso_str:
+                        # Only append UTC offset when there is no offset (Z or ±HH:MM)
+                        has_offset = "Z" in iso_str or bool(re.search(r"[+-]\d{2}:", iso_str))
+                        if not has_offset:
                             iso_str += "+00:00"
                         escaped = iso_str.replace("'", "''")
                         val_str = f"CAST('{escaped}' AS datetimeoffset(6))"
