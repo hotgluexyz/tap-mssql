@@ -569,7 +569,7 @@ class mssqlStream(SQLStream):
                 else:
                     val_str = str(start_val)
                 
-                where_clause = f'WHERE [{self.replication_key}] >= {val_str}'
+                where_clause = f'WHERE [{self.replication_key}] > {val_str}'
                 query_parts.append(where_clause)
 
             # Add ORDER BY clause
@@ -662,10 +662,6 @@ class mssqlStream(SQLStream):
                 return pendulum.parse(raw).isoformat()
             if fmt == "date":
                 return pendulum.parse(raw).date().isoformat()
-            if prop.get("type") == "integer":
-                return int(raw)
-            if prop.get("type") == "number":
-                return float(raw)
             return raw
         except Exception as e:
             self.logger.warning(
