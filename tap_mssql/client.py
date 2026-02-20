@@ -611,13 +611,9 @@ class mssqlStream(SQLStream):
         # Build server string
         server = f'tcp:{host},{port}'
 
-        # Build BCP command
-        # Note: The delimiter \x1F needs to be passed properly
-        # In Python, we'll use the actual character
-        delimiter = '\x1F'
-
         # BCP expects the query as a quoted string argument
         # The query should be wrapped in quotes for the command
+        # -t delimiter must match BCP_DELIMITER used by _get_last_replication_key_value_from_csv
         cmd = [
             BCP_PATH,
             sql_query,  # The query string will be passed as-is, subprocess handles quoting
@@ -628,7 +624,7 @@ class mssqlStream(SQLStream):
             '-U', user,
             '-P', password,
             '-c',
-            '-t', delimiter,
+            '-t', BCP_DELIMITER,
             '-b', '1000000000',  # Large batch size to avoid summary messages
         ]
         # ODBC Driver 18 requires -u to trust server cert when TrustServerCertificate=yes in config
