@@ -559,7 +559,12 @@ class mssqlStream(SQLStream):
                 if isinstance(start_val, (datetime.datetime, datetime.date)):
                     # Format datetime/date values for SQL Server
                     if isinstance(start_val, datetime.datetime):
-                        val_str = start_val.strftime("'%Y-%m-%d %H:%M:%S'")
+                        # ISO format with timezone for datetimeoffset comparison
+                        iso_str = start_val.isoformat()
+                        if "+" not in iso_str and "Z" not in iso_str:
+                            iso_str += "+00:00"
+                        escaped = iso_str.replace("'", "''")
+                        val_str = f"CAST('{escaped}' AS datetimeoffset(6))"
                     else:
                         val_str = start_val.strftime("'%Y-%m-%d'")
                 elif isinstance(start_val, str):
