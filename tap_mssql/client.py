@@ -559,6 +559,8 @@ class mssqlStream(SQLStream):
                 if isinstance(start_val, (datetime.datetime, datetime.date)):
                     # Format datetime/date values for SQL Server
                     if isinstance(start_val, datetime.datetime):
+                        # Add 1ms so we query strictly after the bookmark (avoid re-reading last record)
+                        start_val = start_val + datetime.timedelta(milliseconds=1)
                         # ISO format with timezone for datetimeoffset comparison
                         iso_str = start_val.isoformat()
                         # Only append UTC offset when there is no offset (Z or ±HH:MM)
