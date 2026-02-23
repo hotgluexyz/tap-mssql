@@ -141,3 +141,4 @@ meltano.yml
 mypy.ini 
 tox.ini
 ci_workflow.yml
+.history
