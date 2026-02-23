@@ -278,92 +278,84 @@ def get_records_via_bcp(
     stream_name = stream.name
     csv_file = os.path.join(LOCAL_OUTPUT_DIR, f"{stream_name}.csv")
 
-    bcp_stdout = ""
-    bcp_stderr = ""
-    bcp_returncode = 0
+    bcp_cmd = _build_bcp_command(stream, sql_query, csv_file)
 
-    try:
-        bcp_cmd = _build_bcp_command(stream, sql_query, csv_file)
+    bcp_cmd_safe = bcp_cmd.copy()
+    if "-P" in bcp_cmd_safe:
+        pwd_idx = bcp_cmd_safe.index("-P")
+        if pwd_idx + 1 < len(bcp_cmd_safe):
+            bcp_cmd_safe[pwd_idx + 1] = "***"
+    stream.logger.info(f"Executing BCP: {' '.join(bcp_cmd_safe)}")
+    stream.logger.info(f"BCP SQL query: {sql_query}")
 
-        bcp_cmd_safe = bcp_cmd.copy()
-        if "-P" in bcp_cmd_safe:
-            pwd_idx = bcp_cmd_safe.index("-P")
-            if pwd_idx + 1 < len(bcp_cmd_safe):
-                bcp_cmd_safe[pwd_idx + 1] = "***"
-        stream.logger.info(f"Executing BCP: {' '.join(bcp_cmd_safe)}")
-        stream.logger.info(f"BCP SQL query: {sql_query}")
+    bcp_start_time = time.time()
+    stream.logger.info(f"Starting BCP export to {csv_file}")
 
-        bcp_start_time = time.time()
-        stream.logger.info(f"Starting BCP export to {csv_file}")
+    bcp_process = subprocess.Popen(
+        bcp_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=False,
+    )
+    stream.logger.info(f"BCP process started (PID: {bcp_process.pid})")
 
-        bcp_process = subprocess.Popen(
-            bcp_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=False,
-        )
-        stream.logger.info(f"BCP process started (PID: {bcp_process.pid})")
+    stream.logger.info("Waiting for BCP to complete...")
+    bcp_stdout_bytes, bcp_stderr_bytes = bcp_process.communicate()
+    bcp_returncode = bcp_process.returncode
+    stream.logger.info(f"BCP process completed with return code: {bcp_returncode}")
 
-        stream.logger.info("Waiting for BCP to complete...")
-        bcp_stdout_bytes, bcp_stderr_bytes = bcp_process.communicate()
-        bcp_returncode = bcp_process.returncode
-        stream.logger.info(f"BCP process completed with return code: {bcp_returncode}")
+    bcp_stdout = bcp_stdout_bytes.decode("utf-8", errors="replace")
+    bcp_stderr = bcp_stderr_bytes.decode("utf-8", errors="replace")
+    stream.logger.info(
+        f"BCP stdout ({len(bcp_stdout)} chars), stderr ({len(bcp_stderr)} chars)"
+    )
 
-        bcp_stdout = bcp_stdout_bytes.decode("utf-8", errors="replace")
-        bcp_stderr = bcp_stderr_bytes.decode("utf-8", errors="replace")
-        stream.logger.info(
-            f"BCP stdout ({len(bcp_stdout)} chars), stderr ({len(bcp_stderr)} chars)"
-        )
-
-        record_count = _parse_rows_copied(bcp_stdout)
-        if record_count == 0 and bcp_stderr:
-            record_count = _parse_rows_copied(bcp_stderr)
-            if record_count:
-                stream.logger.info(
-                    f"Parsed record count from BCP stderr: {record_count:,} rows"
-                )
+    record_count = _parse_rows_copied(bcp_stdout)
+    if record_count == 0 and bcp_stderr:
+        record_count = _parse_rows_copied(bcp_stderr)
         if record_count:
             stream.logger.info(
-                f"Parsed record count from BCP output: {record_count:,} rows"
+                f"Parsed record count from BCP stderr: {record_count:,} rows"
             )
-        if record_count == 0:
-            stream.logger.warning(
-                'Could not parse "X rows copied" from BCP output. '
-                f"stdout last 500 chars: {bcp_stdout[-500:]!r}; stderr: {bcp_stderr[-500:]!r}"
-            )
-
-        if bcp_returncode != 0:
-            error_msg = f"BCP command failed with return code {bcp_returncode}"
-            if bcp_stderr:
-                error_msg += f": {bcp_stderr.strip()[-500:]}"
-            if bcp_stdout and not bcp_stderr:
-                error_msg += f": {bcp_stdout.strip()[-500:]}"
-            stream.logger.error(error_msg)
-            raise RuntimeError(error_msg)
-
-        bcp_end_time = time.time()
-        bcp_duration = bcp_end_time - bcp_start_time
-        csv_size = os.path.getsize(csv_file)
-        csv_size_mb = csv_size / (1024 * 1024)
+    if record_count:
         stream.logger.info(
-            f"BCP export completed in {bcp_duration:.2f} seconds. "
-            f"CSV file: {csv_file} ({csv_size_mb:.2f} MB)"
+            f"Parsed record count from BCP output: {record_count:,} rows"
+        )
+    if record_count == 0:
+        stream.logger.warning(
+            'Could not parse "X rows copied" from BCP output. '
+            f"stdout last 500 chars: {bcp_stdout[-500:]!r}; stderr: {bcp_stderr[-500:]!r}"
         )
 
-        _update_job_metrics(stream, stream_name, record_count, LOCAL_OUTPUT_DIR)
-        stream.logger.info(f"Emitted metric for {record_count:,} records")
+    if bcp_returncode != 0:
+        error_msg = f"BCP command failed with return code {bcp_returncode}"
+        if bcp_stderr:
+            error_msg += f": {bcp_stderr.strip()[-500:]}"
+        if bcp_stdout and not bcp_stderr:
+            error_msg += f": {bcp_stdout.strip()[-500:]}"
+        stream.logger.error(error_msg)
+        raise RuntimeError(error_msg)
 
-        if record_count > 0 and stream.replication_key:
-            last_rk_value = _get_last_replication_key_value_from_csv(
-                stream, csv_file, selected_column_names
+    bcp_end_time = time.time()
+    bcp_duration = bcp_end_time - bcp_start_time
+    csv_size = os.path.getsize(csv_file)
+    csv_size_mb = csv_size / (1024 * 1024)
+    stream.logger.info(
+        f"BCP export completed in {bcp_duration:.2f} seconds. "
+        f"CSV file: {csv_file} ({csv_size_mb:.2f} MB)"
+    )
+
+    _update_job_metrics(stream, stream_name, record_count, LOCAL_OUTPUT_DIR)
+    stream.logger.info(f"Emitted metric for {record_count:,} records")
+
+    if record_count > 0 and stream.replication_key:
+        last_rk_value = _get_last_replication_key_value_from_csv(
+            stream, csv_file, selected_column_names
+        )
+        if last_rk_value is not None:
+            dummy_record = {stream.replication_key: last_rk_value}
+            stream.logger.info(
+                f"Yielding dummy record from last CSV row to advance bookmark "
+                f"{stream.replication_key!r} = {last_rk_value!r}"
             )
-            if last_rk_value is not None:
-                dummy_record = {stream.replication_key: last_rk_value}
-                stream.logger.info(
-                    f"Yielding dummy record from last CSV row to advance bookmark "
-                    f"{stream.replication_key!r} = {last_rk_value!r}"
-                )
-                yield dummy_record
-
-    finally:
-        pass  # Keep the CSV file; don't delete it
+            yield dummy_record
