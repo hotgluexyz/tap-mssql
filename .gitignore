@@ -142,4 +142,3 @@ meltano.yml
 mypy.ini 
 tox.ini
 ci_workflow.yml
-!templates/config.json
