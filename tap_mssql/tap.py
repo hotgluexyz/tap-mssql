@@ -192,10 +192,23 @@ class Tapmssql(SQLTap):
             description="The earliest record date to sync"
         ),
         th.Property(
+            "max_records",
+            th.IntegerType,
+            description="Optional maximum number of records to sync per stream. "
+            "When set, SELECT queries use TOP max_records (and BCP uses the same limit when use_bcp_for_sync is True)."
+        ),
+        th.Property(
             "hd_jsonschema_types",
             th.BooleanType,
             default=False,
             description="Turn on Higher Defined(HD) JSON Schema types to assist Targets"
+        ),
+        th.Property(
+            "use_bcp_for_sync",
+            th.BooleanType,
+            default=False,
+            description="When True, export stream data via BCP (Bulk Copy Program) instead of SQL. "
+            "Data is written to CSV on disk; only a bookmark record is yielded for state."
         ),
     ).to_dict()
 

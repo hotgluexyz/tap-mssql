@@ -23,6 +23,8 @@ from sqlalchemy.engine.url import URL
 from singer_sdk import SQLConnector, SQLStream
 from singer_sdk.batch import BaseBatcher, lazy_chunked_generator
 
+from tap_mssql import bcp_helper
+
 
 class mssqlConnector(SQLConnector):
     """Connects to the mssql SQL source."""
@@ -487,6 +489,9 @@ class mssqlStream(SQLStream):
         starting bookmark, the records will be filtered for values greater
         than or equal to the bookmark value.
 
+        When config use_bcp_for_sync is True, data is exported via BCP and
+        only a bookmark record is yielded; otherwise the default SQL path is used.
+
         Args:
             context: If partition context is provided, will read specifically
                 from this data slice.
@@ -502,6 +507,10 @@ class mssqlStream(SQLStream):
             raise NotImplementedError(
                 f"Stream '{self.name}' does not support partitioning.",
             )
+
+        if self.config.get("use_bcp_for_sync"):
+            yield from bcp_helper.get_records_via_bcp(self, context)
+            return
 
         selected_column_names = self.get_selected_schema()["properties"].keys()
         table = self.connector.get_table(
