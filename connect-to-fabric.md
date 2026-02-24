@@ -1,6 +1,6 @@
 # Connecting to a Microsoft Fabric Warehouse
 
-Use a Entra service principal (app-only) to connect to the warehouse without a user/password.
+Use a Entra service principal to connect to the warehouse without a user/password.
 
 ## Getting service principal credentials
 
@@ -8,7 +8,7 @@ Use a Entra service principal (app-only) to connect to the warehouse without a u
    - Go to [Azure Portal](https://portal.azure.com) → **Microsoft Entra ID** → **Manage** → **App registrations** → **New registration**.
    - Name the app (e.g. `tap-mssql-fabric`), choose **Single tenant only**, then **Register**.
 
-2. **Get Client ID and Tenant ID**
+2. **Get Client ID**
    - On the app’s **Overview** page, copy **Application (client) ID** that will be used as `user`.
 
 3. **Create a client secret**
