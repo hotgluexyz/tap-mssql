@@ -2,10 +2,12 @@
 
 Used when config use_bcp_for_sync is True to export stream data via BCP
 instead of SQLAlchemy. Data is written to CSV on disk; get_records_via_bcp
-yields a single bookmark record for state advancement.
+advances the bookmark via singer.write_bookmark + StateMessage (like tap-snowflake).
+No dummy records are yielded.
 """
 from __future__ import annotations
 
+import copy
 import datetime
 import json
 import os
@@ -16,6 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import pendulum
+import singer
 
 # Get output directory from environment variables
 job_root = os.environ.get("JOB_ROOT")
@@ -254,22 +257,59 @@ def _parse_rows_copied(text: str) -> int:
     return count
 
 
+def _advance_bookmark_for_bcp(stream: Any, last_rk_value: Any) -> None:
+    """Advance bookmark using singer.write_bookmark + StateMessage (tap-snowflake style).
+
+    Writes the bookmark directly and emits a StateMessage when the stream has
+    access to the tap's state (e.g. stream._tap.state). No dummy record is yielded.
+    """
+    tap = getattr(stream, "_tap", None)
+    state = None
+    if tap is not None:
+        state = getattr(tap, "state", None) or getattr(tap, "_state", None)
+    tap_stream_id = getattr(stream, "tap_stream_id", stream.name)
+
+    # Normalize for JSON state (e.g. datetime/date -> ISO string)
+    rep_key_value: Any = last_rk_value
+    if isinstance(rep_key_value, (datetime.datetime, datetime.date)):
+        rep_key_value = pendulum.instance(rep_key_value).isoformat()
+
+    if state is not None:
+        state = singer.write_bookmark(
+            state,
+            tap_stream_id,
+            "replication_key_value",
+            rep_key_value,
+        )
+        singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
+        stream.logger.info(
+            f"Wrote bookmark via singer.write_bookmark for "
+            f"{stream.replication_key!r} = {rep_key_value!r}"
+        )
+    else:
+        stream.logger.warning(
+            "Could not advance bookmark: tap state not available on stream. "
+            "Bookmark for %r will not be updated.",
+            stream.replication_key,
+        )
+
+
 def get_records_via_bcp(
     stream: Any,
     context: dict | None,
 ) -> Iterable[dict[str, Any]]:
-    """Yield records for BCP-based sync.
+    """Run BCP export and advance bookmark via singer.write_bookmark + StateMessage.
 
-    Runs BCP to export stream data to CSV, then yields a single dummy record
-    with the last replication key value for bookmark advancement (when
-    replication_key is set). Actual data remains in the CSV on disk.
+    Runs BCP to export stream data to CSV. When replication_key is set and
+    record_count > 0, advances the bookmark by writing state directly (no
+    dummy record). Actual data remains in the CSV on disk.
 
     Args:
         stream: mssqlStream instance (self from get_records).
         context: Stream partition or context dictionary.
 
     Yields:
-        Zero or one dict (bookmark record when replication_key and record_count > 0).
+        Nothing (records are in the CSV on disk; bookmark is written to state).
     """
     selected_column_names = list(stream.get_selected_schema()["properties"].keys())
     sql_query = _build_sql_query_string(stream, selected_column_names, context)
@@ -353,9 +393,4 @@ def get_records_via_bcp(
             stream, csv_file, selected_column_names
         )
         if last_rk_value is not None:
-            dummy_record = {stream.replication_key: last_rk_value}
-            stream.logger.info(
-                f"Yielding dummy record from last CSV row to advance bookmark "
-                f"{stream.replication_key!r} = {last_rk_value!r}"
-            )
-            yield dummy_record
+            _advance_bookmark_for_bcp(stream, last_rk_value)
