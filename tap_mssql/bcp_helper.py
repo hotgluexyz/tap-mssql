@@ -400,3 +400,8 @@ def get_records_via_bcp(
         )
         if last_rk_value is not None:
             _advance_bookmark_for_bcp(stream, last_rk_value)
+
+    # No records yielded (data is in CSV); this makes the function a generator
+    # so "yield from get_records_via_bcp(...)" in client.get_records is valid.
+    return
+    yield  # unreachable; ensures this is a generator
