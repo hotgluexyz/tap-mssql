@@ -2,8 +2,8 @@
 
 Used when config use_bcp_for_sync is True to export stream data via BCP
 instead of SQLAlchemy. Data is written to CSV on disk; get_records_via_bcp
-advances the bookmark via singer.write_bookmark + StateMessage (like tap-snowflake).
-No dummy records are yielded.
+advances the bookmark by writing a Singer STATE message to stdout (no
+singer-python dependency). No dummy records are yielded.
 """
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Iterable
 
 import pendulum
-import singer
 
 # Get output directory from environment variables
 job_root = os.environ.get("JOB_ROOT")
@@ -257,11 +257,19 @@ def _parse_rows_copied(text: str) -> int:
     return count
 
 
-def _advance_bookmark_for_bcp(stream: Any, last_rk_value: Any) -> None:
-    """Advance bookmark using singer.write_bookmark + StateMessage (tap-snowflake style).
+def _write_state_message(state: dict[str, Any]) -> None:
+    """Emit a Singer STATE message to stdout (NDJSON). No singer-python dependency."""
+    msg = {"type": "STATE", "value": state}
+    sys.stdout.write(json.dumps(msg, default=str) + "\n")
+    sys.stdout.flush()
 
-    Writes the bookmark directly and emits a StateMessage when the stream has
-    access to the tap's state (e.g. stream._tap.state). No dummy record is yielded.
+
+def _advance_bookmark_for_bcp(stream: Any, last_rk_value: Any) -> None:
+    """Advance bookmark by writing a Singer STATE message to stdout.
+
+    Uses the tap's state when available (e.g. stream._tap.state). No dummy
+    record is yielded. Implemented without singer-python to avoid jsonschema
+    conflict with singer-sdk.
     """
     tap = getattr(stream, "_tap", None)
     state = None
@@ -275,15 +283,13 @@ def _advance_bookmark_for_bcp(stream: Any, last_rk_value: Any) -> None:
         rep_key_value = pendulum.instance(rep_key_value).isoformat()
 
     if state is not None:
-        state = singer.write_bookmark(
-            state,
-            tap_stream_id,
-            "replication_key_value",
-            rep_key_value,
-        )
-        singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
+        state = copy.deepcopy(state)
+        bookmarks = state.setdefault("bookmarks", {})
+        stream_bookmark = bookmarks.setdefault(tap_stream_id, {})
+        stream_bookmark["replication_key_value"] = rep_key_value
+        _write_state_message(state)
         stream.logger.info(
-            f"Wrote bookmark via singer.write_bookmark for "
+            f"Wrote bookmark (STATE message) for "
             f"{stream.replication_key!r} = {rep_key_value!r}"
         )
     else:
