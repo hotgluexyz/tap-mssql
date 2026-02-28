@@ -245,13 +245,13 @@ def _update_job_metrics(stream: Any, stream_name: str, record_count: int, output
         f.truncate()
 
 
-def _parse_rows_copied(text: str) -> int:
-    """Return last 'N rows copied' value found in text, or 0."""
-    count = 0
+def _parse_rows_copied(text: str) -> int | None:
+    """Return last 'N rows copied' value found in text, or None if not found."""
+    count: int | None = None
     for line in text.strip().split("\n"):
         line = line.strip()
         if line:
-            match = re.search(r"(\d+)\s+rows?\s+copied", line, re.IGNORECASE)
+            match = re.search(r"(\d+)\s+rows?\s+copied\.?", line, re.IGNORECASE)
             if match:
                 count = int(match.group(1))
     return count
@@ -286,6 +286,7 @@ def _advance_bookmark_for_bcp(stream: Any, last_rk_value: Any) -> None:
         state = copy.deepcopy(state)
         bookmarks = state.setdefault("bookmarks", {})
         stream_bookmark = bookmarks.setdefault(tap_stream_id, {})
+        stream_bookmark["replication_key"] = stream.replication_key
         stream_bookmark["replication_key_value"] = rep_key_value
         _write_state_message(state)
         stream.logger.info(
@@ -357,21 +358,22 @@ def get_records_via_bcp(
     )
 
     record_count = _parse_rows_copied(bcp_stdout)
-    if record_count == 0 and bcp_stderr:
+    if record_count is None and bcp_stderr:
         record_count = _parse_rows_copied(bcp_stderr)
-        if record_count:
+        if record_count is not None:
             stream.logger.info(
                 f"Parsed record count from BCP stderr: {record_count:,} rows"
             )
-    if record_count:
+    if record_count is not None:
         stream.logger.info(
             f"Parsed record count from BCP output: {record_count:,} rows"
         )
-    if record_count == 0:
+    if record_count is None:
         stream.logger.warning(
             'Could not parse "X rows copied" from BCP output. '
             f"stdout last 500 chars: {bcp_stdout[-500:]!r}; stderr: {bcp_stderr[-500:]!r}"
         )
+    record_count = record_count if record_count is not None else 0
 
     if bcp_returncode != 0:
         error_msg = f"BCP command failed with return code {bcp_returncode}"
