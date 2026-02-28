@@ -438,6 +438,19 @@ class mssqlStream(SQLStream):
 
     connector_class = mssqlConnector
 
+    def _write_record_message(self, record: dict) -> None:
+        """Write out a RECORD message, or no-op when use_bcp_for_sync is True.
+
+        When BCP is used, get_records yields only a dummy bookmark record for
+        state advancement; we skip writing it to output so no dummy record
+        is emitted to the target. We still set _is_state_flushed = False so
+        the SDK emits the state message at end of sync (with the updated bookmark).
+        """
+        if self.config.get("use_bcp_for_sync"):
+            self._is_state_flushed = False
+            return
+        super()._write_record_message(record)
+
     def post_process(
         self,
         row: dict,
