@@ -285,9 +285,12 @@ def _advance_bookmark_for_bcp(stream: Any, last_rk_value: Any) -> None:
     if state is not None:
         state = copy.deepcopy(state)
         bookmarks = state.setdefault("bookmarks", {})
-        stream_bookmark = bookmarks.setdefault(tap_stream_id, {})
-        stream_bookmark["replication_key"] = stream.replication_key
-        stream_bookmark["replication_key_value"] = rep_key_value
+        # Emit only replication_key and replication_key_value (no SDK keys like
+        # replication_key_signpost or starting_replication_value).
+        bookmarks[tap_stream_id] = {
+            "replication_key": stream.replication_key,
+            "replication_key_value": rep_key_value,
+        }
         _write_state_message(state)
         stream.logger.info(
             f"Wrote bookmark (STATE message) for "
