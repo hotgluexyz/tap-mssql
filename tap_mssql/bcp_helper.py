@@ -130,7 +130,7 @@ def _build_sql_query_string(
             else:
                 val_str = str(start_val)
 
-            query_parts.append(f"WHERE [{stream.replication_key}] > {val_str}")
+            query_parts.append(f"WHERE [{stream.replication_key}] >= {val_str}")
 
         query_parts.append(f"ORDER BY [{stream.replication_key}]")
 
@@ -242,16 +242,21 @@ def _update_job_metrics(stream: Any, stream_name: str, record_count: int, output
         f.truncate()
 
 
-def _parse_rows_copied(text: str) -> int:
-    """Return last 'N rows copied' value found in text, or 0."""
+def _parse_rows_copied(text: str) -> tuple[int, bool]:
+    """Return (last 'N rows copied' value found in text, True if any line matched).
+
+    Returns (0, False) when no "X rows copied" line is found.
+    """
     count = 0
+    found = False
     for line in text.strip().split("\n"):
         line = line.strip()
         if line:
-            match = re.search(r"(\d+)\s+rows?\s+copied", line, re.IGNORECASE)
+            match = re.search(r"(\d+)\s+rows?\s+copied\.?", line, re.IGNORECASE)
             if match:
                 count = int(match.group(1))
-    return count
+                found = True
+    return (count, found)
 
 
 def get_records_via_bcp(
@@ -310,18 +315,20 @@ def get_records_via_bcp(
         f"BCP stdout ({len(bcp_stdout)} chars), stderr ({len(bcp_stderr)} chars)"
     )
 
-    record_count = _parse_rows_copied(bcp_stdout)
-    if record_count == 0 and bcp_stderr:
-        record_count = _parse_rows_copied(bcp_stderr)
-        if record_count:
+    record_count, found_in_stdout = _parse_rows_copied(bcp_stdout)
+    if not found_in_stdout and bcp_stderr:
+        record_count, found_in_stderr = _parse_rows_copied(bcp_stderr)
+        if found_in_stderr and record_count:
             stream.logger.info(
                 f"Parsed record count from BCP stderr: {record_count:,} rows"
             )
-    if record_count:
-        stream.logger.info(
-            f"Parsed record count from BCP output: {record_count:,} rows"
-        )
-    if record_count == 0:
+        found_in_stdout = found_in_stderr
+    if found_in_stdout:
+        if record_count:
+            stream.logger.info(
+                f"Parsed record count from BCP output: {record_count:,} rows"
+            )
+    else:
         stream.logger.warning(
             'Could not parse "X rows copied" from BCP output. '
             f"stdout last 500 chars: {bcp_stdout[-500:]!r}; stderr: {bcp_stderr[-500:]!r}"
